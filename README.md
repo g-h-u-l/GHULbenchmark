@@ -7,7 +7,7 @@
 ![Language](https://img.shields.io/badge/Language-Bash%20%7C%20POSIX-005f91)
 ![Best on AMD](https://img.shields.io/badge/Best%20Experience-AMDGPU-ea1d22?logo=amd&logoColor=white)
 ![CPU](https://img.shields.io/badge/CPU-7zip%20%7C%20sysbench%20%7C%20stress--ng-blueviolet)
-![GPU](https://img.shields.io/badge/Graphics-Vulkan%20%7C%20OpenGL-6a1bb3
+![GPU](https://img.shields.io/badge/Graphics-Vulkan%20%7C%20OpenGL-6a1bb3)
 ![RAM](https://img.shields.io/badge/RAM-mbw-lightgrey)
 ![Network](https://img.shields.io/badge/Network-iperf3-5b5b5b)
 ![JSON](https://img.shields.io/badge/Output-JSON-orange?logo=json&logoColor=white)
