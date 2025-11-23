@@ -10,7 +10,7 @@ It focuses on transparent, reproducible benchmarking and hardware analysis – b
 GHULbench consists of three main components:
 
 - `firstrun.sh` – First-run helper for dependency checking and hardware log generation.
-- `ghul-bench.sh` – Benchmark runner producing JSON result files plus logs.
+- `ghul-benchmark.sh` – Benchmark runner producing JSON result files plus logs.
 - `ghul-analyze.sh` – Compares two GHULbench runs and prints a human-readable analysis.
 
 All scripts:
@@ -23,7 +23,7 @@ All scripts:
 ```
 GHULbench/
 ├── firstrun.sh
-├── ghul-bench.sh
+├── ghul-benchmark.sh
 ├── ghul-analyze.sh
 ├── logs/
 └── results/
@@ -48,7 +48,7 @@ On Arch/Manjaro, `firstrun.sh` can install missing packages automatically when r
 ```
 git clone https://github.com/g-h-u-l/GHULbench.git
 cd GHULbench
-chmod +x firstrun.sh ghul-bench.sh ghul-analyze.sh
+chmod +x firstrun.sh ghul-benchmark.sh ghul-analyze.sh
 ```
 
 ## 🧪 First run
@@ -66,7 +66,7 @@ sudo ./firstrun.sh
 ## 🏃 Benchmark run
 
 ```
-./ghul-bench.sh
+./ghul-benchmark.sh
 ```
 
 Produces a JSON result in `results/` plus logs in `logs/`.
