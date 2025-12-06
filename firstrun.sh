@@ -23,6 +23,11 @@ OUTDIR="${BASE}/results"
 # Create all necessary directories upfront
 mkdir -p "${LOGDIR}" "${LOGDIR}/runs" "${LOGDIR}/sensors" "${OUTDIR}"
 
+# If running as root, ensure directories belong to the actual user
+if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+  chown -R "${SUDO_USER}:${SUDO_USER}" "${LOGDIR}" "${OUTDIR}" 2>/dev/null || true
+fi
+
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # Small helpers for pretty output
