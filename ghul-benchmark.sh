@@ -19,7 +19,7 @@ set -euo pipefail
 
 # GHUL version
 GHUL_VERSION="0.1"
-GHUL_REPO="g-h-u-l/ghulbenchmark"
+GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
 # Enforce predictable C locale (important for awk/jq and numeric formatting)

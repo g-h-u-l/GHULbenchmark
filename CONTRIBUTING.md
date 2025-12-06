@@ -60,7 +60,7 @@ By contributing, you agree that your contributions will be licensed under the GP
 # Create directory and clone repository
 mkdir ~/GHULbenchmark
 cd ~/GHULbenchmark
-git clone https://github.com/g-h-u-l/ghulbenchmark.git .
+git clone https://github.com/g-h-u-l/GHULbenchmark.git .
 chmod +x *.sh tools/*.sh
 ./firstrun.sh  # Check dependencies
 ```

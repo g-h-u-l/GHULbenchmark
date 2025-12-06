@@ -52,7 +52,7 @@ sudo apt install git
 # 2. Create directory and clone repository
 mkdir ~/GHULbenchmark
 cd ~/GHULbenchmark
-git clone https://github.com/g-h-u-l/ghulbenchmark.git .
+git clone https://github.com/g-h-u-l/GHULbenchmark.git .
 
 # 3. Make scripts executable (usually not needed, but safe to do)
 chmod +x *.sh tools/*.sh
