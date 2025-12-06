@@ -102,7 +102,9 @@ check_for_updates || true
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTDIR="${BASE}/results"
 LOGDIR="${BASE}/logs/runs"
-mkdir -p "${OUTDIR}" "${LOGDIR}"
+SENSORSDIR="${BASE}/logs/sensors"
+# Create all necessary directories upfront
+mkdir -p "${OUTDIR}" "${LOGDIR}" "${SENSORSDIR}"
 
 TS="$(date +%Y-%m-%d-%H-%M)"
 HOST="$(hostname)"
@@ -116,8 +118,9 @@ echo "== GHUL Benchmark (${HOST} @ ${TS}) =="
 
 # --------- Start sensor watch ---------------------------------------------------
 SENSORS_HELPER="${BASE}/tools/ghul-sensors-helper.sh"
-SENSORS_PIDFILE="${BASE}/logs/sensors/.ghul_sensors.pid"
-mkdir -p "$(dirname "$SENSORS_PIDFILE")"
+SENSORS_PIDFILE="${SENSORSDIR}/.ghul_sensors.pid"
+# Directory already created above, but ensure it exists
+mkdir -p "${SENSORSDIR}"
 
 echo "[GHUL] Starting sensors helper..."
 
@@ -1066,7 +1069,7 @@ rm -f "$SENSORS_PIDFILE" 2>/dev/null || true
 echo "== GHUL run complete =="
 echo "Result saved to: $OUTFILE"
 echo "Logs: $LOGDIR"
-SENSORS_FILE="${BASE}/logs/sensors/${TS}-${HOST}-sensors.jsonl"
+SENSORS_FILE="${SENSORSDIR}/${TS}-${HOST}-sensors.jsonl"
 if [[ -f "$SENSORS_FILE" ]]; then
   echo "Sensor data: $SENSORS_FILE"
 fi
