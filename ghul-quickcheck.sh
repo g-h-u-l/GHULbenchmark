@@ -45,9 +45,9 @@ jqr() {
 
 # ---------- preflight ----------------------------------------------------------
 
-if [[ ! -d "results" || ! -d "logs" || ! -d "benchmarks" ]]; then
+if [[ ! -d "results" || ! -d "logs" ]]; then
   red "[GHUL] Please run this script from your GHULbenchmark directory."
-  echo "[GHUL] Expected ./results, ./logs and ./benchmarks here."
+  echo "[GHUL] Expected ./results and ./logs here."
   exit 1
 fi
 

@@ -34,16 +34,70 @@ num_or_zero() {
 }
 
 ###############################################################################
-# Check args
+# Check args and find result files
 ###############################################################################
 
-if [[ $# -ne 2 ]]; then
-    echo "Usage: $0 <old.json> <new.json>"
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESULTS_DIR="${BASE}/results"
+
+# If no arguments: find the last two runs automatically
+if [[ $# -eq 0 ]]; then
+    # Find all JSON files in results/, sort by modification time (newest first)
+    JSON_FILES=($(ls -1t "${RESULTS_DIR}"/*.json 2>/dev/null | head -n2 || true))
+    
+    if [[ ${#JSON_FILES[@]} -lt 2 ]]; then
+        echo "Error: Need at least 2 benchmark runs to compare." >&2
+        echo "Found ${#JSON_FILES[@]} run(s) in ${RESULTS_DIR}/" >&2
+        echo >&2
+        echo "Usage:" >&2
+        echo "  $0                    # Compare last 2 runs automatically" >&2
+        echo "  $0 <old.json> <new.json>  # Compare specific files" >&2
+        echo "  $0 results/old.json results/new.json  # With paths" >&2
+        exit 1
+    fi
+    
+    OLD="${JSON_FILES[1]}"  # Second newest (older)
+    NEW="${JSON_FILES[0]}"  # Newest
+    
+    echo "[GHUL] Auto-selected last 2 runs:"
+    echo "  Old: $(basename "$OLD")"
+    echo "  New: $(basename "$NEW")"
+    echo
+
+# If 2 arguments: use them as file paths
+elif [[ $# -eq 2 ]]; then
+    OLD="$1"
+    NEW="$2"
+    
+    # If paths don't contain "/", assume they're in results/
+    if [[ "$OLD" != */* ]]; then
+        OLD="${RESULTS_DIR}/${OLD}"
+    fi
+    if [[ "$NEW" != */* ]]; then
+        NEW="${RESULTS_DIR}/${NEW}"
+    fi
+    
+    # Check if files exist
+    if [[ ! -f "$OLD" ]]; then
+        echo "Error: Old file not found: $OLD" >&2
+        exit 1
+    fi
+    if [[ ! -f "$NEW" ]]; then
+        echo "Error: New file not found: $NEW" >&2
+        exit 1
+    fi
+else
+    echo "Usage: $0 [<old.json> <new.json>]" >&2
+    echo >&2
+    echo "Without arguments: Compare the last 2 runs from results/" >&2
+    echo "With arguments:    Compare specific JSON files" >&2
+    echo >&2
+    echo "Examples:" >&2
+    echo "  $0" >&2
+    echo "  $0 2025-11-29-13-39-sharkoon.json 2025-11-30-10-56-sharkoon.json" >&2
+    echo "  $0 results/old.json results/new.json" >&2
     exit 1
 fi
-
-OLD="$1"
-NEW="$2"
 
 echo "== GHUL Analyze =="
 echo
