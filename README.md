@@ -39,13 +39,22 @@ GHULbenchmark/
 
 GHULbenchmark should be cloned into a user directory (e.g., `~/GHULbenchmark`) and all scripts should be run from within that directory. This ensures all scripts know where to find the necessary files and directories.
 
-```bash
-# Clone the repository
-cd ~
-git clone https://github.com/g-h-u-l/GHULbenchmark.git
-cd GHULbenchmark
+### Step-by-Step Installation
 
-# Make scripts executable (if needed)
+```bash
+# 1. Install git (if not already installed)
+# On Arch/Manjaro:
+sudo pacman -S git
+
+# On Debian/Ubuntu:
+sudo apt install git
+
+# 2. Create directory and clone repository
+mkdir ~/GHULbenchmark
+cd ~/GHULbenchmark
+git clone https://github.com/g-h-u-l/ghulbenchmark.git .
+
+# 3. Make scripts executable (usually not needed, but safe to do)
 chmod +x *.sh tools/*.sh
 ```
 
