@@ -1,0 +1,26 @@
+# GHULbenchmark .gitignore
+
+# User-generated data (should not be in repo)
+logs/
+results/
+db/
+.ghul_host_id.json
+
+# Unigine benchmarks (private, not for community)
+benchmarks/
+
+# Test results
+UniBenchResults/
+
+# Temporary files
+*.tmp
+*.log
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Upload guides (only for developer)
+GITHUB_UPLOAD*.md
+
