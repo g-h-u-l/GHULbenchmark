@@ -19,7 +19,9 @@ export LC_NUMERIC=C
 # Get absolute path of this script (GHULbenchmark base dir)
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGDIR="${BASE}/logs"
-mkdir -p "${LOGDIR}"
+OUTDIR="${BASE}/results"
+# Create all necessary directories upfront
+mkdir -p "${LOGDIR}" "${LOGDIR}/runs" "${LOGDIR}/sensors" "${OUTDIR}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
