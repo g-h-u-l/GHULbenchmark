@@ -95,6 +95,7 @@ CORE_CMDS=(
   "sensors"
   "fio"
   "smartctl"
+  "nvme"
 )
 
 CORE_PKGS=(
@@ -111,6 +112,7 @@ CORE_PKGS=(
   "lm_sensors"     # sensors
   "fio"            # fio
   "smartmontools"  # smartctl
+  "nvme-cli"       # nvme (for NVMe temperature reading)
 )
 
 # AUR packages (require AUR helper: pamac or yay)

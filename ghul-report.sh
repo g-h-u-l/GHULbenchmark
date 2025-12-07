@@ -312,7 +312,8 @@ segment_report() {
   metric_stats "GPU hotspot temp (°C)"  "gpu_hotspot_c"   "$start_epoch" "$end_epoch"
   metric_stats "GPU memory temp (°C)"   "gpu_memtemp_c"   "$start_epoch" "$end_epoch"
   metric_stats "GPU power (W)"          "gpu_power_w"     "$start_epoch" "$end_epoch"
-  metric_stats "GPU fan (RPM)"          "gpu_fan_rpm"     "$start_epoch" "$end_epoch"
+  # GPU fan: For NVIDIA, this is actually % (0-100), not RPM
+  metric_stats "GPU fan (RPM/%)"        "gpu_fan_rpm"     "$start_epoch" "$end_epoch"
   metric_stats "Case fan1 (RPM)"        "fan1_rpm"        "$start_epoch" "$end_epoch"
   metric_stats "Case fan2 (RPM)"        "fan2_rpm"        "$start_epoch" "$end_epoch"
   metric_stats "Case fan3 (RPM)"        "fan3_rpm"        "$start_epoch" "$end_epoch"
@@ -378,7 +379,8 @@ metric_stats "GPU edge temp (°C)"     "gpu_temp_c"      "$RUN_START_EPOCH" "$SE
 metric_stats "GPU hotspot temp (°C)"  "gpu_hotspot_c"   "$RUN_START_EPOCH" "$SENS_LAST_TS"
 metric_stats "GPU memory temp (°C)"   "gpu_memtemp_c"   "$RUN_START_EPOCH" "$SENS_LAST_TS"
 metric_stats "GPU power (W)"          "gpu_power_w"     "$RUN_START_EPOCH" "$SENS_LAST_TS"
-metric_stats "GPU fan (RPM)"          "gpu_fan_rpm"     "$RUN_START_EPOCH" "$SENS_LAST_TS"
+  # GPU fan: For NVIDIA, this is actually % (0-100), not RPM
+  metric_stats "GPU fan (RPM/%)"        "gpu_fan_rpm"     "$RUN_START_EPOCH" "$SENS_LAST_TS"
 metric_stats "Case fan1 (RPM)"        "fan1_rpm"        "$RUN_START_EPOCH" "$SENS_LAST_TS"
 metric_stats "Case fan2 (RPM)"        "fan2_rpm"        "$RUN_START_EPOCH" "$SENS_LAST_TS"
 metric_stats "Case fan3 (RPM)"        "fan3_rpm"        "$RUN_START_EPOCH" "$SENS_LAST_TS"

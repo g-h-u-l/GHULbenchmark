@@ -270,6 +270,7 @@ discover_fans() {
   local fan_array=()
   
   # Collect all fan*_input values from sensors -j
+  # Exclude GPU fans (amdgpu, nvidia) - only collect case/motherboard fans
   while IFS= read -r fan_value; do
     if [[ -n "$fan_value" && "$fan_value" != "null" && "$fan_value" != "0" ]]; then
       fan_array+=("$fan_value")
@@ -278,9 +279,11 @@ discover_fans() {
     fi
   done < <(printf '%s' "$sensors_json" | jq -r '
     paths(scalars) as $p |
-    if ($p[-1] | test("fan[0-9]+_input")) and
-       (getpath($p) | type == "number") and
-       (getpath($p) > 0) then
+    # Match fan*_input but exclude GPU-related paths (amdgpu, nvidia)
+    if (($p | tostring | test("amdgpu|nvidia") | not) and
+        ($p[-1] | test("fan[0-9]+_input")) and
+        (getpath($p) | type == "number") and
+        (getpath($p) > 0)) then
       getpath($p)
     else
       empty
@@ -343,12 +346,28 @@ read_storage_temp() {
   
   # Method 1: Try /sys for NVMe (works without root)
   if [[ "$device" =~ ^nvme ]]; then
+    # Try direct hwmon path first
     if [[ -r "/sys/block/${device}/device/hwmon" ]]; then
       for hwmon in /sys/block/${device}/device/hwmon/hwmon*/temp*_input; do
         if [[ -r "$hwmon" ]]; then
           local temp_mdeg
           temp_mdeg="$(cat "$hwmon" 2>/dev/null || echo 0)"
-          if [[ "$temp_mdeg" != "0" ]]; then
+          if [[ "$temp_mdeg" != "0" && -n "$temp_mdeg" ]]; then
+            temp="$(awk -v t="$temp_mdeg" 'BEGIN { printf "%.1f", t/1000 }')"
+            break
+          fi
+        fi
+      done
+    fi
+    # Alternative: Try /sys/class/nvme/ path
+    if [[ "$temp" == "null" || "$temp" == "0" ]]; then
+      local nvme_name
+      nvme_name="$(echo "$device" | sed 's/p[0-9]*$//')"  # nvme0n1p2 -> nvme0n1
+      for temp_file in /sys/class/nvme/${nvme_name}/device/hwmon/hwmon*/temp*_input; do
+        if [[ -r "$temp_file" ]]; then
+          local temp_mdeg
+          temp_mdeg="$(cat "$temp_file" 2>/dev/null || echo 0)"
+          if [[ "$temp_mdeg" != "0" && -n "$temp_mdeg" ]]; then
             temp="$(awk -v t="$temp_mdeg" 'BEGIN { printf "%.1f", t/1000 }')"
             break
           fi
@@ -361,26 +380,38 @@ read_storage_temp() {
   if [[ "$temp" == "null" || "$temp" == "0" ]]; then
     if command -v smartctl >/dev/null 2>&1; then
       local dev_path="/dev/${device}"
-      # Try smartctl with different device types (sat, ata, auto)
-      for dev_type in "sat" "ata" ""; do
-        local smartctl_cmd
-        if [[ -z "$dev_type" ]]; then
-          smartctl_cmd="smartctl -A \"$dev_path\""
-        else
-          smartctl_cmd="smartctl -d $dev_type -A \"$dev_path\""
-        fi
-        temp="$(eval "$smartctl_cmd" 2>/dev/null | awk '
-          /Airflow_Temperature_Cel/ { print $10; exit }
-          /Temperature_Celsius/ { print $10; exit }
+      # For NVMe, try nvme device type first
+      if [[ "$device" =~ ^nvme ]]; then
+        local nvme_base
+        nvme_base="$(echo "$device" | sed 's/p[0-9]*$//')"  # nvme0n1p2 -> nvme0n1
+        temp="$(smartctl -A "/dev/${nvme_base}" 2>/dev/null | awk '
           /Temperature:/ { print $2; exit }
           /^[0-9][0-9][0-9][[:space:]]+194/ { print $10; exit }
           /^[0-9][0-9][0-9][[:space:]]+190/ { print $10; exit }
         ' | head -n1)"
-        # If we got a valid temperature, break
-        if [[ -n "$temp" && "$temp" != "0" && "$temp" != "null" ]]; then
-          break
-        fi
-      done
+      fi
+      # If still no temperature, try different device types (sat, ata, auto)
+      if [[ "$temp" == "null" || "$temp" == "0" || -z "$temp" ]]; then
+        for dev_type in "sat" "ata" ""; do
+          local smartctl_cmd
+          if [[ -z "$dev_type" ]]; then
+            smartctl_cmd="smartctl -A \"$dev_path\""
+          else
+            smartctl_cmd="smartctl -d $dev_type -A \"$dev_path\""
+          fi
+          temp="$(eval "$smartctl_cmd" 2>/dev/null | awk '
+            /Airflow_Temperature_Cel/ { print $10; exit }
+            /Temperature_Celsius/ { print $10; exit }
+            /Temperature:/ { print $2; exit }
+            /^[0-9][0-9][0-9][[:space:]]+194/ { print $10; exit }
+            /^[0-9][0-9][0-9][[:space:]]+190/ { print $10; exit }
+          ' | head -n1)"
+          # If we got a valid temperature, break
+          if [[ -n "$temp" && "$temp" != "0" && "$temp" != "null" ]]; then
+            break
+          fi
+        done
+      fi
     fi
   fi
   
