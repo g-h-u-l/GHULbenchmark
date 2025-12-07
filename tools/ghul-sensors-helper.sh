@@ -115,9 +115,11 @@ read_amd_gpu_sensors() {
   
   # Extract edge temperature (usually amdgpu-pci-* -> edge)
   # Note: sensors -j returns values in degrees, but some might be in millidegrees
+  # IMPORTANT: Only match "edge" field under amdgpu paths, not CPU temp*_input fields
   edge="$(printf '%s' "$sensors_json" | jq -r '
     paths(scalars) as $p |
-    if ($p[-1] == "edge" or ($p[-1] | test("temp[0-9]+_input"))) and
+    # Check if path contains "amdgpu" (GPU sensor) and field is "edge"
+    if (($p | tostring | test("amdgpu")) and $p[-1] == "edge") and
        (getpath($p) | type == "number") and
        (getpath($p) > 0) then
       getpath($p)
@@ -133,9 +135,11 @@ read_amd_gpu_sensors() {
   done | head -n1 || echo "")"
   
   # Extract hotspot/junction temperature
+  # IMPORTANT: Only match under amdgpu paths
   hotspot="$(printf '%s' "$sensors_json" | jq -r '
     paths(scalars) as $p |
-    if ($p[-1] == "junction" or $p[-1] == "hotspot") and
+    # Check if path contains "amdgpu" (GPU sensor) and field is "junction" or "hotspot"
+    if (($p | tostring | test("amdgpu")) and ($p[-1] == "junction" or $p[-1] == "hotspot")) and
        (getpath($p) | type == "number") and
        (getpath($p) > 0) then
       getpath($p)
@@ -151,9 +155,11 @@ read_amd_gpu_sensors() {
   done | head -n1 || echo "")"
   
   # Extract memory temperature
+  # IMPORTANT: Only match under amdgpu paths
   mem="$(printf '%s' "$sensors_json" | jq -r '
     paths(scalars) as $p |
-    if ($p[-1] == "mem" or ($p[-1] | test("mem.*temp"))) and
+    # Check if path contains "amdgpu" (GPU sensor) and field is "mem"
+    if (($p | tostring | test("amdgpu")) and $p[-1] == "mem") and
        (getpath($p) | type == "number") and
        (getpath($p) > 0) then
       getpath($p)
@@ -169,11 +175,13 @@ read_amd_gpu_sensors() {
   done | head -n1 || echo "")"
   
   # Extract power (PPT or power1_average)
+  # IMPORTANT: Only match under amdgpu paths
   power="$(printf '%s' "$sensors_json" | jq -r '
     paths(scalars) as $p |
-    if (($p[-1] == "PPT" or $p[-1] == "power1_average") and
+    # Check if path contains "amdgpu" (GPU sensor) and field is "PPT" or "power1_average"
+    if (($p | tostring | test("amdgpu")) and ($p[-1] == "PPT" or $p[-1] == "power1_average")) and
        (getpath($p) | type == "number") and
-       (getpath($p) > 0)) then
+       (getpath($p) > 0) then
       getpath($p)
     else
       empty
@@ -181,11 +189,13 @@ read_amd_gpu_sensors() {
   ' 2>/dev/null | head -n1 || echo "")"
   
   # Extract GPU fan (usually fan1 under amdgpu)
+  # IMPORTANT: Only match under amdgpu paths
   fan="$(printf '%s' "$sensors_json" | jq -r '
     paths(scalars) as $p |
-    if (($p[-1] | test("fan[0-9]+_input")) and
+    # Check if path contains "amdgpu" (GPU sensor) and field matches fan*_input
+    if (($p | tostring | test("amdgpu")) and ($p[-1] | test("fan[0-9]+_input"))) and
        (getpath($p) | type == "number") and
-       (getpath($p) > 0)) then
+       (getpath($p) > 0) then
       getpath($p)
     else
       empty
@@ -230,14 +240,21 @@ read_nvidia_gpu_sensors() {
   nvidia_output="$(nvidia-smi --query-gpu=temperature.gpu,fan.speed,power.draw --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "")"
   
   if [[ -n "$nvidia_output" ]]; then
+    # Parse CSV output: temperature,fan_speed,power_draw
+    # Note: nvidia-smi may include spaces, so we use xargs to trim
     temp="$(echo "$nvidia_output" | cut -d',' -f1 | xargs || echo "")"
     fan="$(echo "$nvidia_output" | cut -d',' -f2 | xargs || echo "")"
     power="$(echo "$nvidia_output" | cut -d',' -f3 | xargs || echo "")"
-  fi
-  
-  # Sanitize: remove % from fan, ensure numeric
-  if [[ -n "$fan" && "$fan" != "null" ]]; then
-    fan="$(echo "$fan" | sed 's/%//' | xargs || echo "")"
+    
+    # Sanitize: remove % from fan speed, ensure values are valid
+    if [[ -n "$fan" && "$fan" != "null" ]]; then
+      fan="$(echo "$fan" | sed 's/%//' | xargs || echo "")"
+    fi
+    
+    # Convert empty strings to null
+    [[ -z "$temp" || "$temp" == "" ]] && temp="null"
+    [[ -z "$fan" || "$fan" == "" ]] && fan="null"
+    [[ -z "$power" || "$power" == "" ]] && power="null"
   fi
   
   echo "$temp|$fan|$power"

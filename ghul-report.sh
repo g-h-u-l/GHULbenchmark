@@ -99,11 +99,13 @@ metric_stats() {
   local values
   local warning=""
 
+  # Extract values for the specific field - ensure we use the correct field name
+  # This explicitly uses the field parameter to avoid any confusion
   values="$(jq -r --argjson s "$start_epoch" --argjson e "$end_epoch" --arg f "$field" '
     select(.timestamp >= $s and .timestamp <= $e)
     | .[$f] // empty
-    | select(. != null)
-  ' "$SENS_FILE" || true)"
+    | select(. != null and . != "")
+  ' "$SENS_FILE" 2>/dev/null || true)"
 
   if [[ -z "$values" ]]; then
     echo "  ${label}: n/a"
