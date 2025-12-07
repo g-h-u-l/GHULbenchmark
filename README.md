@@ -5,7 +5,7 @@ The project aims to build a community database to document
 and compare hardware performance under Linux.
 
 - **GitHub**: https://github.com/g-h-u-l/
-- **Project Page**: https://ghul.gnucifer.de
+- **Project Page**: https://ghul.run
 
 ## Why GHUL?
 
@@ -42,6 +42,9 @@ GHULbenchmark should be cloned into a user directory (e.g., `~/GHULbenchmark`) a
 ### Step-by-Step Installation
 
 ```bash
+# Update your system first:
+sudo pacman -Syu
+
 # 1. Install git (if not already installed)
 # On Arch/Manjaro:
 sudo pacman -S git
@@ -49,10 +52,10 @@ sudo pacman -S git
 # On Debian/Ubuntu:
 sudo apt install git
 
-# 2. Create directory and clone repository
-mkdir ~/GHULbenchmark
-cd ~/GHULbenchmark
+# 2. Clone repository
+cd ~/
 git clone https://github.com/g-h-u-l/GHULbenchmark.git .
+cd GHULbenchmark
 
 # 3. Make scripts executable (usually not needed, but safe to do)
 chmod +x *.sh tools/*.sh
