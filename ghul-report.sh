@@ -97,6 +97,7 @@ metric_stats() {
   local start_epoch="$3"
   local end_epoch="$4"
   local values
+  local warning=""
 
   values="$(jq -r --argjson s "$start_epoch" --argjson e "$end_epoch" --arg f "$field" '
     select(.timestamp >= $s and .timestamp <= $e)
@@ -111,7 +112,39 @@ metric_stats() {
 
   # shellcheck disable=SC2086
   read -r min max avg <<<"$(printf '%s\n' $values | compute_stats)"
-  echo "  ${label}: min=${min}, max=${max}, avg=${avg}"
+  
+  # Temperature warnings based on field type
+  if [[ "$field" == "cpu_temp_c" ]]; then
+    # CPU: > 100°C = CRITICAL, > 80°C = WARNING
+    if (( $(echo "$max >= 100.0" | bc -l) )); then
+      warning=" ⚠ CRITICAL: CPU overheating! Check thermal paste and cooling immediately!"
+    elif (( $(echo "$max > 80.0" | bc -l) )); then
+      warning=" ⚠ WARNING: CPU temp high, check cooling"
+    fi
+  elif [[ "$field" == "gpu_temp_c" ]]; then
+    # GPU Edge: > 95°C = CRITICAL, > 85°C = WARNING
+    if (( $(echo "$max >= 95.0" | bc -l) )); then
+      warning=" ⚠ CRITICAL: GPU overheating! Check thermal paste and cooling immediately!"
+    elif (( $(echo "$max > 85.0" | bc -l) )); then
+      warning=" ⚠ WARNING: GPU temp high, check cooling"
+    fi
+  elif [[ "$field" == "gpu_hotspot_c" ]]; then
+    # GPU Hotspot: > 110°C = CRITICAL, > 100°C = WARNING
+    if (( $(echo "$max >= 110.0" | bc -l) )); then
+      warning=" ⚠ CRITICAL: GPU hotspot overheating! Check thermal paste and cooling immediately!"
+    elif (( $(echo "$max > 100.0" | bc -l) )); then
+      warning=" ⚠ WARNING: GPU hotspot temp high, check cooling"
+    fi
+  elif [[ "$field" == "gpu_memtemp_c" ]]; then
+    # GPU Memory: > 100°C = CRITICAL, > 90°C = WARNING
+    if (( $(echo "$max >= 100.0" | bc -l) )); then
+      warning=" ⚠ CRITICAL: GPU memory overheating! Check cooling immediately!"
+    elif (( $(echo "$max > 90.0" | bc -l) )); then
+      warning=" ⚠ WARNING: GPU memory temp high, check cooling"
+    fi
+  fi
+  
+  echo "  ${label}: min=${min}, max=${max}, avg=${avg}${warning}"
 }
 
 # Get storage device label (mount point or model) for display
@@ -199,9 +232,12 @@ storage_temp_stats() {
   # Get label for device
   label="$(get_storage_label "$device")"
   
-  # Check for high temperature warning (> 55°C)
-  if (( $(echo "$max > 55.0" | bc -l) )); then
-    warning=" ⚠ Storage temp high, check airflow"
+  # Check for high temperature warning
+  # Storage: >= 70°C = CRITICAL, > 55°C = WARNING
+  if (( $(echo "$max >= 70.0" | bc -l) )); then
+    warning=" ⚠ CRITICAL: Storage overheating! Check airflow immediately!"
+  elif (( $(echo "$max > 55.0" | bc -l) )); then
+    warning=" ⚠ WARNING: Storage temp high, check airflow"
   fi
   
   echo "  Storage ${device}${label} temp (°C): min=${min}, max=${max}, avg=${avg}${warning}"

@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.1"
+GHUL_VERSION="0.2"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -68,29 +68,44 @@ check_for_updates() {
     fi
   fi
   
-  # Compare versions (simple string comparison, works for semantic versioning)
+  # Compare versions (semantic versioning comparison)
+  # Only show update message if latest_version is actually newer than current
   if [[ -n "$latest_version" && "$latest_version" != "$GHUL_VERSION" ]]; then
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ⚠  GHUL Update Available!"
-    echo ""
-    echo "  Current version: ${GHUL_VERSION}"
-    echo "  Latest version:   ${latest_version}"
-    echo ""
-    echo "  Update with:"
-    echo "    cd $(dirname "$BASE")"
-    echo "    git pull"
-    echo ""
-    echo "  Or visit: ${GHUL_REPO_URL}/releases"
-    echo ""
-    read -p "  Continue with benchmark anyway? [Y/n] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ -n "$REPLY" ]]; then
-      echo "  Benchmark cancelled."
-      exit 0
+    # Simple version comparison: split by dots and compare numerically
+    local current_major current_minor latest_major latest_minor
+    IFS='.' read -r current_major current_minor <<< "$GHUL_VERSION"
+    IFS='.' read -r latest_major latest_minor <<< "$latest_version"
+    
+    # Check if latest version is actually newer
+    local is_newer=0
+    if [[ "$latest_major" -gt "$current_major" ]] || \
+       ([[ "$latest_major" -eq "$current_major" ]] && [[ "$latest_minor" -gt "$current_minor" ]]); then
+      is_newer=1
     fi
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
+    
+    if [[ $is_newer -eq 1 ]]; then
+      echo ""
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "  ⚠  GHUL Update Available!"
+      echo ""
+      echo "  Current version: ${GHUL_VERSION}"
+      echo "  Latest version:   ${latest_version}"
+      echo ""
+      echo "  Update with:"
+      echo "    cd $(pwd)"
+      echo "    git pull"
+      echo ""
+      echo "  Or visit: ${GHUL_REPO_URL}/releases"
+      echo ""
+      read -p "  Continue with benchmark anyway? [Y/n] " -n 1 -r
+      echo
+      if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ -n "$REPLY" ]]; then
+        echo "  Benchmark cancelled."
+        exit 0
+      fi
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo ""
+    fi
   fi
 }
 
@@ -215,6 +230,7 @@ fi
 # ---- GPU manufacturer + model extraction ----
 gpu_man="unknown"
 gpu_model="unknown"
+gpu_vendor="unknown"  # v0.2: lowercase vendor for sensor detection (amd/nvidia/intel/unknown)
 
 if have lspci; then
   # First VGA/3D card
@@ -223,10 +239,13 @@ if have lspci; then
     # Hersteller
     if echo "$l" | grep -qi 'NVIDIA'; then
       gpu_man="NVIDIA"
+      gpu_vendor="nvidia"
     elif echo "$l" | grep -qi 'AMD\|ATI'; then
       gpu_man="AMD"
+      gpu_vendor="amd"
     elif echo "$l" | grep -qi 'Intel'; then
       gpu_man="Intel"
+      gpu_vendor="intel"
     fi
 
     # try to fetch model in square brackets (Radeon ...)
@@ -340,7 +359,7 @@ parse_dmidecode_memory() {
   local in_block=0
 
   while IFS= read -r line; do
-    # Start eines DIMM-Blocks
+    # Start of a DIMM block
     if [[ "$line" =~ ^Handle.*DMI\ type\ 17 ]]; then
       if [[ $in_block -eq 1 ]]; then
         json=$(printf '%s' "$json" | jq --argjson obj "$current" '. + [$obj]')
@@ -350,7 +369,7 @@ parse_dmidecode_memory() {
       continue
     fi
 
-    # Innerhalb eines DIMM-Blocks
+    # Inside a DIMM block
     if [[ $in_block -eq 1 ]]; then
       key=$(echo "$line" | cut -d: -f1 | sed 's/^[ \t]*//;s/[ \t]*$//;s/ /_/g' | tr 'A-Z' 'a-z')
       val=$(echo "$line" | cut -d: -f2- | sed 's/^[ \t]*//;s/[ \t]*$//')
@@ -362,7 +381,7 @@ parse_dmidecode_memory() {
     fi
   done <"$file"
 
-  # Letzten Block anhängen
+  # Append last block
   if [[ $in_block -eq 1 ]]; then
     json=$(printf '%s' "$json" | jq --argjson obj "$current" '. + [$obj]')
   fi
@@ -938,8 +957,15 @@ if have vkmark; then
   done <"$tmp_log"
 
   cat "$tmp_log" >"$vk_log"
-  GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --arg s "${score}" '. + {vkmark_score: ($s|tonumber? // 0)}')"
-  GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --argjson obj "$SCENES_JSON" '. + {vkmark_scenes: $obj}')"
+  
+  # v0.2: Handle NVIDIA vkmark limitation (proprietary driver)
+  # If GPU vendor is NVIDIA and score is 0, set score to null and add note
+  if [[ "$gpu_vendor" == "nvidia" && "$score" == "0" ]]; then
+    GPU_JSON="$(printf '%s' "$GPU_JSON" | jq '. + {vkmark_score: null, vkmark_note: "Skipped on NVIDIA (proprietary driver limitation)", vkmark_scenes: {}}')"
+  else
+    GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --arg s "${score}" '. + {vkmark_score: ($s|tonumber? // 0)}')"
+    GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --argjson obj "$SCENES_JSON" '. + {vkmark_scenes: $obj}')"
+  fi
 else
   GPU_JSON="$(printf '%s' "$GPU_JSON" | jq '. + {vkmark_score:"missing", vkmark_scenes:{}}')"
 fi

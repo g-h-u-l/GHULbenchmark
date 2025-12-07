@@ -80,7 +80,7 @@ ARG="$1"
 
 # Case 1: argument is a directory → pick newest JSON inside it
 if [[ -d "$ARG" ]]; then
-  # normalize directory (remove trailing slash for ls, ist aber hier egal)
+  # normalize directory (remove trailing slash for ls, but doesn't matter here)
   dir="$ARG"
   RESULT_FILE=$(ls -1 "$dir"/*.json 2>/dev/null | sort | tail -n1 || true)
 
@@ -130,7 +130,8 @@ gpu_model="$(jqr '.environment.gpu_model // "unknown"' "$RESULT_FILE")"
 
 # GPU assessment
 glmark2="$(jqr '.gpu.glmark2_score // 0' "$RESULT_FILE")"
-vkmark="$(jqr '.gpu.vkmark_score // 0' "$RESULT_FILE")"
+vkmark="$(jq -r '.gpu.vkmark_score // empty' "$RESULT_FILE")"
+vkmark_note="$(jq -r '.gpu.vkmark_note // empty' "$RESULT_FILE")"
 gputest_score="$(jqr '.gpu.gputest_fur.score // 0' "$RESULT_FILE")"
 gputest_fps="$(jqr '.gpu.gputest_fur.fps // 0' "$RESULT_FILE")"
 
@@ -174,7 +175,12 @@ mem_gib=$(awk "BEGIN{printf \"%.1f\", ${mem_kib}/1048576}" 2>/dev/null || echo "
 
 # numeric helpers (for thresholds)
 n_glmark2=$(printf "%.0f" "${glmark2:-0}" 2>/dev/null || echo 0)
-n_vkmark=$(printf "%.0f" "${vkmark:-0}" 2>/dev/null || echo 0)
+# Handle vkmark: if null or empty, treat as 0 for rating purposes
+if [[ -z "$vkmark" || "$vkmark" == "null" ]]; then
+  n_vkmark=0
+else
+  n_vkmark=$(printf "%.0f" "${vkmark:-0}" 2>/dev/null || echo 0)
+fi
 n_gputest_fps=$(printf "%.0f" "${gputest_fps:-0}" 2>/dev/null || echo 0)
 n_p7=$(printf "%.0f" "${p7_mips:-0}" 2>/dev/null || echo 0)
 n_mbw=$(awk "BEGIN{printf \"%.1f\", ${mbw_gib}}" 2>/dev/null || echo 0)
@@ -271,6 +277,36 @@ echo "stress-ng crypt:     $stress_crypt bogo-ops"
 echo
 echo "CPU rating:          $rate_cpu"
 
+# CPU temperature warnings
+if [[ -n "$SENS_FILE" && -f "$SENS_FILE" ]]; then
+  RUN_START_EPOCH="$(jq -r '.timeline[]? | select(.name=="run_start") | .epoch' "$RESULT_FILE" | head -n1 || jq -r '.timeline[0].epoch // empty' "$RESULT_FILE" || echo "")"
+  SENS_LAST_TS="$(jq -r 'select(.timestamp != null) | .timestamp' "$SENS_FILE" | tail -n1 || echo "")"
+  
+  if [[ -n "$RUN_START_EPOCH" && -n "$SENS_LAST_TS" ]]; then
+    cpu_temps=$(jq -r --argjson s "$RUN_START_EPOCH" --argjson e "$SENS_LAST_TS" '
+      select(.timestamp >= $s and .timestamp <= $e)
+      | .cpu_temp_c // empty
+      | select(. != null)
+    ' "$SENS_FILE" 2>/dev/null || true)
+    
+    if [[ -n "$cpu_temps" ]]; then
+      cpu_max=$(echo "$cpu_temps" | awk 'BEGIN{max=0} {if($1>max) max=$1} END{print max}')
+      cpu_avg=$(echo "$cpu_temps" | awk '{sum+=$1; cnt++} END{if(cnt>0) printf "%.1f", sum/cnt; else print "0"}')
+      
+      if (( $(echo "$cpu_max >= 100.0" | bc -l) )); then
+        echo "$(red "CPU temperature:     max=${cpu_max}°C, avg=${cpu_avg}°C")"
+        echo "$(red "                     ⚠ CRITICAL: CPU overheating! Check thermal paste and cooling immediately!")"
+      elif (( $(echo "$cpu_max > 80.0" | bc -l) )); then
+        echo "$(yellow "CPU temperature:     max=${cpu_max}°C, avg=${cpu_avg}°C")"
+        echo "$(yellow "                     ⚠ WARNING: CPU temp high, check cooling")"
+      else
+        echo "CPU temperature:     max=${cpu_max}°C, avg=${cpu_avg}°C"
+      fi
+      echo
+    fi
+  fi
+fi
+
 headline "RAM assessment"
 
 echo "mbw memcpy:          ${mbw_gib} GiB/s"
@@ -334,10 +370,94 @@ echo "RAM rating:          $rate_ram"
 headline "GPU assessment"
 
 echo "glmark2 score:       $glmark2"
-echo "vkmark score:        $vkmark"
+if [[ -z "$vkmark" || "$vkmark" == "null" ]]; then
+  if [[ -n "$vkmark_note" && "$vkmark_note" != "null" ]]; then
+    echo "vkmark score:        null ($vkmark_note)"
+  else
+    echo "vkmark score:        null (not available)"
+  fi
+else
+  echo "vkmark score:        $vkmark"
+fi
 echo "GpuTest FurMark:     score=$gputest_score, FPS=$gputest_fps"
 echo
 echo "GPU rating:          $rate_gpu"
+
+# GPU temperature warnings
+if [[ -n "$SENS_FILE" && -f "$SENS_FILE" ]]; then
+  RUN_START_EPOCH="$(jq -r '.timeline[]? | select(.name=="run_start") | .epoch' "$RESULT_FILE" | head -n1 || jq -r '.timeline[0].epoch // empty' "$RESULT_FILE" || echo "")"
+  SENS_LAST_TS="$(jq -r 'select(.timestamp != null) | .timestamp' "$SENS_FILE" | tail -n1 || echo "")"
+  
+  if [[ -n "$RUN_START_EPOCH" && -n "$SENS_LAST_TS" ]]; then
+    # GPU Edge temperature
+    gpu_temps=$(jq -r --argjson s "$RUN_START_EPOCH" --argjson e "$SENS_LAST_TS" '
+      select(.timestamp >= $s and .timestamp <= $e)
+      | .gpu_temp_c // empty
+      | select(. != null)
+    ' "$SENS_FILE" 2>/dev/null || true)
+    
+    if [[ -n "$gpu_temps" ]]; then
+      gpu_max=$(echo "$gpu_temps" | awk 'BEGIN{max=0} {if($1>max) max=$1} END{print max}')
+      gpu_avg=$(echo "$gpu_temps" | awk '{sum+=$1; cnt++} END{if(cnt>0) printf "%.1f", sum/cnt; else print "0"}')
+      
+      if (( $(echo "$gpu_max >= 95.0" | bc -l) )); then
+        echo "$(red "GPU edge temp:        max=${gpu_max}°C, avg=${gpu_avg}°C")"
+        echo "$(red "                     ⚠ CRITICAL: GPU overheating! Check thermal paste and cooling immediately!")"
+      elif (( $(echo "$gpu_max > 85.0" | bc -l) )); then
+        echo "$(yellow "GPU edge temp:        max=${gpu_max}°C, avg=${gpu_avg}°C")"
+        echo "$(yellow "                     ⚠ WARNING: GPU temp high, check cooling")"
+      else
+        echo "GPU edge temp:        max=${gpu_max}°C, avg=${gpu_avg}°C"
+      fi
+    fi
+    
+    # GPU Hotspot temperature
+    gpu_hotspot_temps=$(jq -r --argjson s "$RUN_START_EPOCH" --argjson e "$SENS_LAST_TS" '
+      select(.timestamp >= $s and .timestamp <= $e)
+      | .gpu_hotspot_c // empty
+      | select(. != null)
+    ' "$SENS_FILE" 2>/dev/null || true)
+    
+    if [[ -n "$gpu_hotspot_temps" ]]; then
+      hotspot_max=$(echo "$gpu_hotspot_temps" | awk 'BEGIN{max=0} {if($1>max) max=$1} END{print max}')
+      hotspot_avg=$(echo "$gpu_hotspot_temps" | awk '{sum+=$1; cnt++} END{if(cnt>0) printf "%.1f", sum/cnt; else print "0"}')
+      
+      if (( $(echo "$hotspot_max >= 110.0" | bc -l) )); then
+        echo "$(red "GPU hotspot temp:     max=${hotspot_max}°C, avg=${hotspot_avg}°C")"
+        echo "$(red "                     ⚠ CRITICAL: GPU hotspot overheating! Check thermal paste and cooling immediately!")"
+      elif (( $(echo "$hotspot_max > 100.0" | bc -l) )); then
+        echo "$(yellow "GPU hotspot temp:     max=${hotspot_max}°C, avg=${hotspot_avg}°C")"
+        echo "$(yellow "                     ⚠ WARNING: GPU hotspot temp high, check cooling")"
+      else
+        echo "GPU hotspot temp:     max=${hotspot_max}°C, avg=${hotspot_avg}°C"
+      fi
+    fi
+    
+    # GPU Memory temperature
+    gpu_mem_temps=$(jq -r --argjson s "$RUN_START_EPOCH" --argjson e "$SENS_LAST_TS" '
+      select(.timestamp >= $s and .timestamp <= $e)
+      | .gpu_memtemp_c // empty
+      | select(. != null)
+    ' "$SENS_FILE" 2>/dev/null || true)
+    
+    if [[ -n "$gpu_mem_temps" ]]; then
+      mem_max=$(echo "$gpu_mem_temps" | awk 'BEGIN{max=0} {if($1>max) max=$1} END{print max}')
+      mem_avg=$(echo "$gpu_mem_temps" | awk '{sum+=$1; cnt++} END{if(cnt>0) printf "%.1f", sum/cnt; else print "0"}')
+      
+      if (( $(echo "$mem_max >= 100.0" | bc -l) )); then
+        echo "$(red "GPU memory temp:      max=${mem_max}°C, avg=${mem_avg}°C")"
+        echo "$(red "                     ⚠ CRITICAL: GPU memory overheating! Check cooling immediately!")"
+      elif (( $(echo "$mem_max > 90.0" | bc -l) )); then
+        echo "$(yellow "GPU memory temp:      max=${mem_max}°C, avg=${mem_avg}°C")"
+        echo "$(yellow "                     ⚠ WARNING: GPU memory temp high, check cooling")"
+      else
+        echo "GPU memory temp:      max=${mem_max}°C, avg=${mem_avg}°C"
+      fi
+    fi
+    
+    echo
+  fi
+fi
 
 headline "Network"
 
@@ -422,12 +542,12 @@ else
             # Temperature rating
             temp_rating=""
             temp_warning=""
-            if (( $(echo "$max >= 70" | bc -l) )); then
+            if (( $(echo "$max >= 70.0" | bc -l) )); then
               temp_rating="$(red "CRITICAL")"
-              temp_warning=" – ⚠ Adjust fan curve immediately!"
-            elif (( $(echo "$max > 60" | bc -l) )); then
+              temp_warning=" – ⚠ CRITICAL: Storage overheating! Check airflow immediately!"
+            elif (( $(echo "$max > 55.0" | bc -l) )); then
               temp_rating="$(yellow "WARNING")"
-              temp_warning=" – ⚠ Storage temp high, check airflow"
+              temp_warning=" – ⚠ WARNING: Storage temp high, check airflow"
             else
               temp_rating="$(green "Good")"
             fi

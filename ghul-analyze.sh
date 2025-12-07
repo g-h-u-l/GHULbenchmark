@@ -250,8 +250,17 @@ echo "-- ${bold}RAM performance${normal} --"
 ram_delta() {
     local name="$1" old="$2" new="$3"
 
-    if [[ "$old" == "" || "$old" == "0" ]]; then
-        printf "  %-20s %10s  ->  %10s  (Δ=   n/a)\n" "$name" "$old" "$new"
+    # Handle null, empty, or "0" values
+    if [[ "$old" == "" || "$old" == "null" || "$old" == "0" ]]; then
+        local old_display="${old:-null}"
+        local new_display="${new:-null}"
+        printf "  %-20s %10s  ->  %10s  (Δ=   n/a)\n" "$name" "$old_display" "$new_display"
+        return
+    fi
+
+    # If new is null/empty/0, show n/a for delta
+    if [[ "$new" == "" || "$new" == "null" || "$new" == "0" ]]; then
+        printf "  %-20s %10.3f  ->  %10s  (Δ=   n/a)\n" "$name" "$old" "${new:-null}"
         return
     fi
 
