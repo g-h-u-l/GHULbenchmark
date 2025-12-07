@@ -25,6 +25,24 @@ if [[ -n "${GHUL_SENSORS_PIDFILE:-}" ]]; then
   echo "$$" > "$GHUL_SENSORS_PIDFILE"
 fi
 
+# sanitize_num: sorgt dafür, dass fehlende oder kaputte Sensorwerte als "null"
+# im JSON landen, damit jq nie an syntaktisch ungültigen Zahlenfeldern scheitert.
+sanitize_num() {
+  local v="$1"
+  # Wenn leer oder nur Whitespace → null
+  if [[ -z "$v" ]]; then
+    echo "null"
+    return
+  fi
+  # Wenn etwas drin ist, aber nicht wie eine Zahl aussieht → null
+  if [[ ! "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "null"
+    return
+  fi
+  # sonst den Wert unverändert zurückgeben
+  echo "$v"
+}
+
 # Detect CPU sensor source
 detect_cpu_sensor() {
   if sensors 2>/dev/null | grep -q "k10temp"; then
@@ -175,6 +193,19 @@ while true; do
   # Convert storage_temps_json to a compact string for printf (or use jq to merge)
   # For simplicity, we'll add it as a JSON object in the output
   storage_temps_str="$(printf '%s' "$storage_temps_json" | jq -c '.' 2>/dev/null || echo "{}")"
+
+  # Sanitize all numeric sensor values to ensure valid JSON (null instead of empty/invalid)
+  cpu_temp="$(sanitize_num "$cpu_temp")"
+  gpu_temp="$(sanitize_num "$gpu_temp")"
+  gpu_hotspot="$(sanitize_num "$gpu_hotspot")"
+  gpu_memtemp="$(sanitize_num "$gpu_memtemp")"
+  gpu_power="$(sanitize_num "$gpu_power")"
+  gpu_fan="$(sanitize_num "$gpu_fan")"
+  fan1="$(sanitize_num "$fan1")"
+  fan2="$(sanitize_num "$fan2")"
+  fan3="$(sanitize_num "$fan3")"
+  fan4="$(sanitize_num "$fan4")"
+  fan5="$(sanitize_num "$fan5")"
 
   # Write JSONL entry (add storage_temps as JSON object)
   printf '{ "timestamp": %s, "cpu_temp_c": %s, "gpu_temp_c": %s, "gpu_hotspot_c": %s, "gpu_memtemp_c": %s, "gpu_power_w": %s, "gpu_fan_rpm": %s, "fan1_rpm": %s, "fan2_rpm": %s, "fan3_rpm": %s, "fan4_rpm": %s, "fan5_rpm": %s, "storage_temps": %s }\n' \

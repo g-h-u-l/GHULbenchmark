@@ -62,16 +62,30 @@ is_arch_like() {
   fi
 }
 
+# Check if AUR helper (pamac or yay) is available
+has_aur_helper() {
+  command -v pamac >/dev/null 2>&1 || command -v yay >/dev/null 2>&1
+}
+
+# Get AUR helper command (pamac or yay)
+get_aur_helper() {
+  if command -v pamac >/dev/null 2>&1; then
+    echo "pamac"
+  elif command -v yay >/dev/null 2>&1; then
+    echo "yay"
+  else
+    return 1
+  fi
+}
+
 # ---------- dependency definitions --------------------------------------------
 
-# Map: command → pacman package
-DEP_CMDS=(
+# Core packages (available via pacman)
+CORE_CMDS=(
   "glmark2"
   "vkmark"
-  "gputest"
   "iperf3"
   "speedtest"
-  "mbw"
   "sysbench"
   "stress-ng"
   "7z"
@@ -83,13 +97,11 @@ DEP_CMDS=(
   "smartctl"
 )
 
-DEP_PKGS=(
+CORE_PKGS=(
   "glmark2"        # glmark2
   "vkmark"         # vkmark
-  "gputest"        # gputest
   "iperf3"         # iperf3
   "speedtest-cli"  # speedtest
-  "mbw"            # mbw
   "sysbench"       # sysbench
   "stress-ng"      # stress-ng
   "p7zip"          # 7z
@@ -101,9 +113,25 @@ DEP_PKGS=(
   "smartmontools"  # smartctl
 )
 
+# AUR packages (require AUR helper: pamac or yay)
+AUR_CMDS=(
+  "gputest"
+  "mbw"
+)
+
+AUR_PKGS=(
+  "gputest"        # gputest
+  "mbw"            # mbw
+)
+
 # Sanity check: arrays must be same length
-if [[ ${#DEP_CMDS[@]} -ne ${#DEP_PKGS[@]} ]]; then
-  echo "Internal error: DEP_CMDS and DEP_PKGS length mismatch." >&2
+if [[ ${#CORE_CMDS[@]} -ne ${#CORE_PKGS[@]} ]]; then
+  echo "Internal error: CORE_CMDS and CORE_PKGS length mismatch." >&2
+  exit 1
+fi
+
+if [[ ${#AUR_CMDS[@]} -ne ${#AUR_PKGS[@]} ]]; then
+  echo "Internal error: AUR_CMDS and AUR_PKGS length mismatch." >&2
   exit 1
 fi
 
@@ -279,30 +307,70 @@ check_deps_user_mode() {
   echo "[*] Checking dependencies (user mode, no automatic install):"
   echo
 
-  local missing_any=0
-  local suggest_cmds=()
+  local missing_core=0
+  local missing_aur=0
+  local suggest_core=()
+  local suggest_aur=()
 
-  for i in "${!DEP_CMDS[@]}"; do
-    local cmd="${DEP_CMDS[$i]}"
-    local pkg="${DEP_PKGS[$i]}"
+  # Check core packages
+  for i in "${!CORE_CMDS[@]}"; do
+    local cmd="${CORE_CMDS[$i]}"
+    local pkg="${CORE_PKGS[$i]}"
 
     if have "$cmd"; then
       printf "  [\e[32m✓\e[0m] %-10s (command: %s)\n" "$pkg" "$cmd"
     else
       printf "  [ ] %-10s (command: %s)  → install with: sudo pacman -S %s\n" "$pkg" "$cmd" "$pkg"
-      missing_any=1
-      suggest_cmds+=("$pkg")
+      missing_core=1
+      suggest_core+=("$pkg")
+    fi
+  done
+
+  # Check AUR packages
+  for i in "${!AUR_CMDS[@]}"; do
+    local cmd="${AUR_CMDS[$i]}"
+    local pkg="${AUR_PKGS[$i]}"
+
+    if have "$cmd"; then
+      printf "  [\e[32m✓\e[0m] %-10s (command: %s) [AUR]\n" "$pkg" "$cmd"
+    else
+      printf "  [ ] %-10s (command: %s)  → install with: %s -S %s [AUR]\n" "$pkg" "$cmd" "$(get_aur_helper 2>/dev/null || echo 'pamac/yay')" "$pkg"
+      missing_aur=1
+      suggest_aur+=("$pkg")
     fi
   done
 
   echo
-  if [[ $missing_any -eq 1 ]]; then
-    yellow "[!] Some dependencies are missing."
+  if [[ $missing_core -eq 1 ]]; then
+    yellow "[!] Some core dependencies are missing."
     echo "    Suggested installation command:"
     echo
-    echo "      sudo pacman -S ${suggest_cmds[*]}"
+    echo "      sudo pacman -S ${suggest_core[*]}"
     echo
-  else
+  fi
+
+  if [[ $missing_aur -eq 1 ]]; then
+    if has_aur_helper; then
+      local aur_helper
+      aur_helper="$(get_aur_helper)"
+      yellow "[!] Some AUR dependencies are missing."
+      echo "    Suggested installation command:"
+      echo
+      echo "      ${aur_helper} -S ${suggest_aur[*]}"
+      echo
+    else
+      yellow "[!] Some AUR dependencies are missing (gputest, mbw)."
+      echo "    These require an AUR helper (pamac or yay)."
+      echo "    Install one of them first, then run:"
+      echo
+      echo "      pamac -S ${suggest_aur[*]}"
+      echo "      # or"
+      echo "      yay -S ${suggest_aur[*]}"
+      echo
+    fi
+  fi
+
+  if [[ $missing_core -eq 0 && $missing_aur -eq 0 ]]; then
     green "[✓] All dependencies are already installed."
   fi
 
@@ -315,33 +383,115 @@ install_deps_root_mode() {
   echo "[*] Checking dependencies (root mode, automatic install):"
   echo
 
-  local missing_pkgs=()
+  local missing_core=()
+  local missing_aur=()
 
-  for i in "${!DEP_CMDS[@]}"; do
-    local cmd="${DEP_CMDS[$i]}"
-    local pkg="${DEP_PKGS[$i]}"
+  # Check core packages
+  for i in "${!CORE_CMDS[@]}"; do
+    local cmd="${CORE_CMDS[$i]}"
+    local pkg="${CORE_PKGS[$i]}"
 
     if have "$cmd"; then
       printf "  [\e[32m✓\e[0m] %-10s (command: %s)\n" "$pkg" "$cmd"
     else
       printf "  [ ] %-10s (command: %s)  → will install\n" "$pkg" "$cmd"
-      missing_pkgs+=("$pkg")
+      missing_core+=("$pkg")
+    fi
+  done
+
+  # Check AUR packages
+  for i in "${!AUR_CMDS[@]}"; do
+    local cmd="${AUR_CMDS[$i]}"
+    local pkg="${AUR_PKGS[$i]}"
+
+    if have "$cmd"; then
+      printf "  [\e[32m✓\e[0m] %-10s (command: %s) [AUR]\n" "$pkg" "$cmd"
+    else
+      printf "  [ ] %-10s (command: %s)  → optional [AUR]\n" "$pkg" "$cmd"
+      missing_aur+=("$pkg")
     fi
   done
 
   echo
-  if (( ${#missing_pkgs[@]} > 0 )); then
-    yellow "[*] Installing missing packages via pacman:"
-    echo "    pacman -S --needed ${missing_pkgs[*]}"
+
+  # Install core packages automatically (no prompt)
+  if (( ${#missing_core[@]} > 0 )); then
+    yellow "[*] Installing missing core packages via pacman (no confirmation needed):"
+    echo "    pacman -S --noconfirm --needed ${missing_core[*]}"
     echo
-    pacman -S --needed "${missing_pkgs[@]}"
+    pacman -S --noconfirm --needed "${missing_core[@]}"
     echo
-    green "[✓] Dependency installation complete."
+    green "[✓] Core dependency installation complete."
   else
-    green "[✓] All dependencies already installed."
+    green "[✓] All core dependencies already installed."
   fi
 
   echo
+
+  # Handle AUR packages (install helper if needed, then packages)
+  if (( ${#missing_aur[@]} > 0 )); then
+    yellow "[*] AUR packages available for installation: ${missing_aur[*]}"
+    echo "    These require an AUR helper (pamac or yay)."
+    echo
+    echo -n "    Install AUR packages? [y/N]: "
+    read -r answer
+    if [[ "${answer,,}" =~ ^y(es)?$ ]]; then
+      local aur_helper=""
+      
+      # Check if AUR helper is already available
+      if has_aur_helper; then
+        aur_helper="$(get_aur_helper)"
+        green "    → AUR helper found: ${aur_helper}"
+      else
+        # No AUR helper found - install pamac-cli (available via pacman)
+        yellow "    → No AUR helper found. Installing pamac-cli..."
+        echo "    → This will allow installation of AUR packages."
+        echo
+        if pacman -S --noconfirm --needed pamac-cli 2>&1 && command -v pamac >/dev/null 2>&1; then
+          aur_helper="pamac"
+          green "    → pamac-cli installed successfully."
+        else
+          yellow "    → Warning: Could not install pamac-cli (may not be available on this distro)."
+          echo "    → You may need to install an AUR helper manually:"
+          echo "      sudo pacman -S pamac-cli"
+          echo "      # or install yay from AUR manually"
+          echo "    → Skipping AUR package installation."
+          echo
+          return 0
+        fi
+      fi
+      
+      echo
+      yellow "    Installing AUR packages via ${aur_helper}..."
+      if [[ "$aur_helper" == "pamac" ]]; then
+        # pamac needs --no-confirm for non-interactive mode
+        pamac install --no-confirm "${missing_aur[@]}" 2>&1 || {
+          yellow "    → Warning: AUR installation may have failed or requires manual intervention."
+        }
+      else
+        # yay uses -S --noconfirm
+        yay -S --noconfirm "${missing_aur[@]}" 2>&1 || {
+          yellow "    → Warning: AUR installation may have failed or requires manual intervention."
+        }
+      fi
+      echo
+      green "[✓] AUR dependency installation attempted."
+    else
+      yellow "    → Skipping AUR package installation."
+      echo "    → You can install them manually later:"
+      if has_aur_helper; then
+        local aur_helper
+        aur_helper="$(get_aur_helper)"
+        echo "      ${aur_helper} -S ${missing_aur[*]}"
+      else
+        echo "      # First install an AUR helper:"
+        echo "      sudo pacman -S pamac-cli"
+        echo "      # Then install AUR packages:"
+        echo "      pamac install ${missing_aur[*]}"
+      fi
+    fi
+    echo
+  fi
 }
 
 # ---------- hardware logs (root mode) -----------------------------------------
