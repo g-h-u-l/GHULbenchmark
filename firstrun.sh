@@ -204,13 +204,15 @@ write_host_id_json() {
   local product="$2"
   local serial="$3"
   local id="$4"
+  local fan_status="${5:-unknown}"
 
   cat > "${HOST_ID_FILE}" <<EOF
 {
   "vendor": "${vendor}",
   "product": "${product}",
   "serial": "${serial}",
-  "id": "${id}"
+  "id": "${id}",
+  "fan_status": "${fan_status}"
 }
 EOF
 }
@@ -224,6 +226,84 @@ generate_host_id_from_board() {
   printf '%s\n' "${vendor}|${product}|${serial}" | sha256sum | awk '{print $1}' | cut -c1-16
 }
 
+# ---------- Fan availability check ---------------------------------------------
+
+check_fan_availability() {
+  # Check if any case/motherboard fans are detectable via sensors or /sys/class/hwmon
+  # Returns: "available" if fans found, "unattainable" if no fans detected
+  # This helps identify systems where SuperIO chips cannot be read (e.g., ACPI-controlled)
+  
+  local fan_found=0
+  
+  # Method 1: Check /sys/class/hwmon for fan*_input files (exclude GPU fans)
+  for hwmon in /sys/class/hwmon/hwmon*; do
+    local hwmon_name
+    hwmon_name="$(cat "$hwmon/name" 2>/dev/null || echo "")"
+    
+    # Skip GPU-related hwmon (amdgpu, nvidia)
+    if [[ "$hwmon_name" =~ (amdgpu|nvidia) ]]; then
+      continue
+    fi
+    
+    # Check for fan*_input files
+    for fan_file in "$hwmon"/fan*_input; do
+      if [[ -r "$fan_file" ]]; then
+        local fan_rpm
+        fan_rpm="$(cat "$fan_file" 2>/dev/null || echo 0)"
+        if [[ "$fan_rpm" != "0" && -n "$fan_rpm" && "$fan_rpm" =~ ^[0-9]+$ ]]; then
+          fan_found=1
+          break 2
+        fi
+      fi
+    done
+  done
+  
+  # Method 2: Check sensors -j (if jq available)
+  if [[ $fan_found -eq 0 ]] && command -v jq >/dev/null 2>&1 && command -v sensors >/dev/null 2>&1; then
+    local sensors_json
+    sensors_json="$(sensors -j 2>/dev/null || echo '{}')"
+    
+    # Check if any fan*_input values exist (excluding GPU fans)
+    local fan_count
+    fan_count="$(printf '%s' "$sensors_json" | jq -r '
+      paths(scalars) as $p |
+      # Match fan*_input but exclude GPU-related paths (amdgpu, nvidia)
+      if (($p | tostring | test("amdgpu|nvidia") | not) and
+          ($p[-1] | test("fan[0-9]+_input")) and
+          (getpath($p) | type == "number") and
+          (getpath($p) > 0)) then
+        1
+      else
+        empty
+      end
+    ' 2>/dev/null | wc -l || echo 0)"
+    
+    if [[ "$fan_count" -gt 0 ]]; then
+      fan_found=1
+    fi
+  fi
+  
+  # Method 3: Check sensors text output (fallback)
+  if [[ $fan_found -eq 0 ]] && command -v sensors >/dev/null 2>&1; then
+    local fan_num=1
+    while [[ $fan_num -le 5 ]]; do
+      local fan_val
+      fan_val="$(sensors 2>/dev/null | awk -v fn="$fan_num" '/fan'$fan_num':/ {gsub(/RPM/,"",$2); print $2+0; exit}' || echo "")"
+      if [[ -n "$fan_val" && "$fan_val" != "0" ]]; then
+        fan_found=1
+        break
+      fi
+      ((fan_num++))
+    done
+  fi
+  
+  if [[ $fan_found -eq 1 ]]; then
+    echo "available"
+  else
+    echo "unattainable"
+  fi
+}
+
 ensure_host_id_root_mode() {
   echo "[*] GHUL Host ID (mainboard-based, JSON):"
   echo
@@ -234,12 +314,16 @@ ensure_host_id_root_mode() {
   local new_product="${MAINBOARD_PRODUCT}"
   local new_serial="${MAINBOARD_SERIAL}"
 
+  # Check fan availability
+  local fan_status
+  fan_status="$(check_fan_availability)"
+
   # If no JSON file exists yet: create a fresh one
   if [[ ! -f "${HOST_ID_FILE}" ]]; then
     local new_id
     new_id="$(generate_host_id_from_board "${new_vendor}" "${new_product}" "${new_serial}")"
     HOST_ID="${new_id}"
-    write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}"
+    write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}"
 
     echo "    Mainboard vendor : ${new_vendor}"
     echo "    Mainboard product: ${new_product}"
@@ -248,25 +332,45 @@ ensure_host_id_root_mode() {
     green "    → New GHUL Host ID: ${HOST_ID}"
     echo "      (stored in ${HOST_ID_FILE})"
     echo
+    
+    # Show fan status warning if unattainable
+    if [[ "$fan_status" == "unattainable" ]]; then
+      yellow "    ⚠ Fan monitoring: NOT AVAILABLE"
+      echo "      The SuperIO chip on this mainboard cannot be accessed by Linux."
+      echo "      This is likely due to proprietary ACPI control that only works on Microsoft Windows."
+      echo "      Fan RPM values will show as 'n/a' in sensor reports, but fans are still working."
+      echo
+    fi
+    
     return 0
   fi
 
   # JSON file exists: read old values
-  local old_vendor old_product old_serial old_id
+  local old_vendor old_product old_serial old_id old_fan_status
   old_vendor="$(json_get_field "vendor"  "${HOST_ID_FILE}")"
   old_product="$(json_get_field "product" "${HOST_ID_FILE}")"
   old_serial="$(json_get_field "serial"  "${HOST_ID_FILE}")"
   old_id="$(json_get_field "id"      "${HOST_ID_FILE}")"
+  old_fan_status="$(json_get_field "fan_status" "${HOST_ID_FILE}" || echo "unknown")"
 
   # If vendor+product are unchanged → keep ID, even if serial changed
   if [[ "${old_vendor}" == "${new_vendor}" && "${old_product}" == "${new_product}" ]]; then
     HOST_ID="${old_id}"
+    # Update fan_status if it changed or was missing
+    if [[ "$old_fan_status" != "$fan_status" ]]; then
+      fan_status="$fan_status"  # Use new status
+    else
+      fan_status="$old_fan_status"  # Keep old status
+    fi
 
     local serial_msg=""
     if [[ -n "${new_serial}" && "${new_serial}" != "unknown" && "${new_serial}" != "${old_serial}" ]]; then
       # Same board type, but different unit (new identical motherboard)
-      write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}"
+      write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}"
       serial_msg="New, identical motherboard detected. ID change NOT needed."
+    else
+      # Update fan_status in existing file if it changed
+      write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}"
     fi
 
     echo "    Mainboard vendor : ${new_vendor}"
@@ -279,6 +383,16 @@ ensure_host_id_root_mode() {
     green "    → Existing GHUL Host ID kept: ${HOST_ID}"
     echo "      (stored in ${HOST_ID_FILE})"
     echo
+    
+    # Show fan status warning if unattainable
+    if [[ "$fan_status" == "unattainable" ]]; then
+      yellow "    ⚠ Fan monitoring: NOT AVAILABLE"
+      echo "      The SuperIO chip on this mainboard cannot be accessed by Linux."
+      echo "      This is likely due to proprietary ACPI control that only works on Microsoft Windows."
+      echo "      Fan RPM values will show as 'n/a' in sensor reports, but fans are still working."
+      echo
+    fi
+    
     return 0
   fi
 
@@ -286,7 +400,7 @@ ensure_host_id_root_mode() {
   local new_id
   new_id="$(generate_host_id_from_board "${new_vendor}" "${new_product}" "${new_serial}")"
   HOST_ID="${new_id}"
-  write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}"
+  write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}"
 
   echo "    Previous board:"
   echo "      vendor : ${old_vendor}"
@@ -302,6 +416,15 @@ ensure_host_id_root_mode() {
   green  "      New ID: ${HOST_ID}"
   echo "      (stored in ${HOST_ID_FILE})"
   echo
+  
+  # Show fan status warning if unattainable
+  if [[ "$fan_status" == "unattainable" ]]; then
+    yellow "    ⚠ Fan monitoring: NOT AVAILABLE"
+    echo "      The SuperIO chip on this mainboard cannot be accessed by Linux."
+    echo "      This is likely due to proprietary ACPI control that only works on Microsoft Windows."
+    echo "      Fan RPM values will show as 'n/a' in sensor reports, but fans are still working."
+    echo
+  fi
 }
 # ---------- non-root dependency check -----------------------------------------
 

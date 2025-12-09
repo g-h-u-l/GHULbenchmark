@@ -39,6 +39,7 @@ num_or_zero() {
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="${BASE}/results"
+HOST_ID_FILE="${BASE}/.ghul_host_id.json"
 
 # If no arguments: find the last two runs automatically
 if [[ $# -eq 0 ]]; then
@@ -153,6 +154,9 @@ RAM_TOTAL_NEW="$(jqn '.environment.mem_total_kib')"
 RAM_TOTAL_OLD_GIB="$(awk -v v="$RAM_TOTAL_OLD" 'BEGIN { printf "%.2f GiB", v/1048576 }')"
 RAM_TOTAL_NEW_GIB="$(awk -v v="$RAM_TOTAL_NEW" 'BEGIN { printf "%.2f GiB", v/1048576 }')"
 
+KERNEL_OLD="$(jqo '.environment.kernel')"
+KERNEL_NEW="$(jqn '.environment.kernel')"
+
 ###############################################################################
 # RAM config extraction
 ###############################################################################
@@ -229,6 +233,14 @@ else
     echo "$RAMCFG_OLD" | sed 's/^/        /'
     echo "      new:"
     echo "$RAMCFG_NEW" | sed 's/^/        /'
+fi
+
+# Kernel: show in blue if same, red/green if different
+if [[ "$KERNEL_OLD" == "$KERNEL_NEW" ]]; then
+    printf "    %-12s ${BLUE}%s${NC}\n" "Kernel:" "$KERNEL_OLD"
+else
+    printf "    %-12s ${RED}old: %s${NC}\n" "Kernel:" "$KERNEL_OLD"
+    printf "                 ${GREEN}new: %s${NC}\n" "$KERNEL_NEW"
 fi
 echo
 
@@ -436,6 +448,192 @@ printf "  CPU:        %7.1f %%\n" "$CS_NUM"
 printf "  GPU:        %7.1f %%\n" "$GS_NUM"
 printf "  NETWORK:    %7.1f %%\n" "$NS_NUM"
 printf "  OVERALL:    %7.1f %%\n" "$OVERALL"
+
+###############################################################################
+# Thermal Analysis (compare sensor data between runs)
+###############################################################################
+echo "-- ${bold}Thermal Analysis${normal} --"
+
+# Helper to find sensor file for a benchmark JSON
+find_sensor_file() {
+    local bench_file="$1"
+    local bench_name
+    bench_name="$(basename "$bench_file")"
+    local bench_prefix
+    bench_prefix="$(echo "$bench_name" | cut -d'-' -f1-5)"
+    local sensor_dir="${BASE}/logs/sensors"
+    ls -1t "${sensor_dir}/${bench_prefix}"*-sensors.jsonl 2>/dev/null | head -n1 || echo ""
+}
+
+# Helper to extract max temperature from sensor file
+extract_max_temp() {
+    local sensor_file="$1"
+    local field="$2"
+    local start_epoch="$3"
+    local end_epoch="$4"
+    
+    if [[ ! -f "$sensor_file" || -z "$start_epoch" || -z "$end_epoch" ]]; then
+        echo "null"
+        return
+    fi
+    
+    local max_temp
+    max_temp="$(jq -r --argjson s "$start_epoch" --argjson e "$end_epoch" --arg f "$field" '
+        select(.timestamp >= $s and .timestamp <= $e)
+        | .[$f] // empty
+        | select(. != null and . != "" and . != "null")
+    ' "$sensor_file" 2>/dev/null | awk 'BEGIN{max=0} {if($1>max) max=$1} END{if(max>0) printf "%.1f", max; else print "null"}' || echo "null")"
+    
+    echo "$max_temp"
+}
+
+SENS_FILE_OLD="$(find_sensor_file "$OLD")"
+SENS_FILE_NEW="$(find_sensor_file "$NEW")"
+
+RUN_START_OLD="$(jq -r '.timeline[]? | select(.name=="run_start") | .epoch' "$OLD" | head -n1 || jq -r '.timeline[0].epoch // empty' "$OLD" || echo "")"
+RUN_END_OLD="$(jq -r '.timeline[]? | select(.name=="run_end") | .epoch' "$OLD" | head -n1 || jq -r '.run_meta.end_epoch // empty' "$OLD" || echo "")"
+RUN_START_NEW="$(jq -r '.timeline[]? | select(.name=="run_start") | .epoch' "$NEW" | head -n1 || jq -r '.timeline[0].epoch // empty' "$NEW" || echo "")"
+RUN_END_NEW="$(jq -r '.timeline[]? | select(.name=="run_end") | .epoch' "$NEW" | head -n1 || jq -r '.run_meta.end_epoch // empty' "$NEW" || echo "")"
+
+# If we have sensor files and timeline data, compare temperatures
+if [[ -f "$SENS_FILE_OLD" && -f "$SENS_FILE_NEW" && -n "$RUN_START_OLD" && -n "$RUN_END_OLD" && -n "$RUN_START_NEW" && -n "$RUN_END_NEW" ]]; then
+    # CPU Temperature
+    CPU_TEMP_OLD="$(extract_max_temp "$SENS_FILE_OLD" "cpu_temp_c" "$RUN_START_OLD" "$RUN_END_OLD")"
+    CPU_TEMP_NEW="$(extract_max_temp "$SENS_FILE_NEW" "cpu_temp_c" "$RUN_START_NEW" "$RUN_END_NEW")"
+    
+    if [[ "$CPU_TEMP_OLD" != "null" && "$CPU_TEMP_NEW" != "null" ]]; then
+        cpu_delta="$(awk -v o="$CPU_TEMP_OLD" -v n="$CPU_TEMP_NEW" 'BEGIN { printf "%.1f", n-o }')"
+        cpu_color="$GREEN"
+        cpu_warning=""
+        
+        # Check for critical temperatures
+        if (( $(echo "$CPU_TEMP_NEW >= 100.0" | bc -l) )); then
+            cpu_color="$RED"
+            cpu_warning=" ⚠ CRITICAL: CPU overheating! Check thermal paste and cooling immediately!"
+        elif (( $(echo "$CPU_TEMP_NEW > 80.0" | bc -l) )); then
+            cpu_color="$YELLOW"
+            cpu_warning=" ⚠ WARNING: CPU temp high"
+        fi
+        
+        # Check for thermal degradation
+        if (( $(echo "$cpu_delta > 5.0" | bc -l) )); then
+            cpu_color="$RED"
+            cpu_warning="${cpu_warning} ⚠ THERMAL DEGRADATION DETECTED!"
+        elif (( $(echo "$cpu_delta < -5.0" | bc -l) )); then
+            cpu_color="$GREEN"
+            cpu_warning=" ✓ Thermal improvement"
+        fi
+        
+        printf "  CPU max temp:      %6.1f°C  ->  %6.1f°C  (Δ=%s%6.1f°C%s)%s\n" \
+            "$CPU_TEMP_OLD" "$CPU_TEMP_NEW" "$cpu_color" "$cpu_delta" "$NC" "$cpu_warning"
+    fi
+    
+    # GPU Temperature
+    GPU_TEMP_OLD="$(extract_max_temp "$SENS_FILE_OLD" "gpu_temp_c" "$RUN_START_OLD" "$RUN_END_OLD")"
+    GPU_TEMP_NEW="$(extract_max_temp "$SENS_FILE_NEW" "gpu_temp_c" "$RUN_START_NEW" "$RUN_END_NEW")"
+    
+    if [[ "$GPU_TEMP_OLD" != "null" && "$GPU_TEMP_NEW" != "null" ]]; then
+        gpu_delta="$(awk -v o="$GPU_TEMP_OLD" -v n="$GPU_TEMP_NEW" 'BEGIN { printf "%.1f", n-o }')"
+        gpu_color="$GREEN"
+        gpu_warning=""
+        
+        # Check for critical temperatures
+        if (( $(echo "$GPU_TEMP_NEW >= 95.0" | bc -l) )); then
+            gpu_color="$RED"
+            gpu_warning=" ⚠ CRITICAL: GPU overheating! Check thermal paste and cooling immediately!"
+        elif (( $(echo "$GPU_TEMP_NEW > 85.0" | bc -l) )); then
+            gpu_color="$YELLOW"
+            gpu_warning=" ⚠ WARNING: GPU temp high"
+        fi
+        
+        # Check for thermal degradation
+        if (( $(echo "$gpu_delta > 5.0" | bc -l) )); then
+            gpu_color="$RED"
+            gpu_warning="${gpu_warning} ⚠ THERMAL DEGRADATION DETECTED!"
+        elif (( $(echo "$gpu_delta < -5.0" | bc -l) )); then
+            gpu_color="$GREEN"
+            gpu_warning=" ✓ Thermal improvement"
+        fi
+        
+        printf "  GPU max temp:      %6.1f°C  ->  %6.1f°C  (Δ=%s%6.1f°C%s)%s\n" \
+            "$GPU_TEMP_OLD" "$GPU_TEMP_NEW" "$gpu_color" "$gpu_delta" "$NC" "$gpu_warning"
+    fi
+    
+    # GPU Hotspot (if available)
+    GPU_HOTSPOT_OLD="$(extract_max_temp "$SENS_FILE_OLD" "gpu_hotspot_c" "$RUN_START_OLD" "$RUN_END_OLD")"
+    GPU_HOTSPOT_NEW="$(extract_max_temp "$SENS_FILE_NEW" "gpu_hotspot_c" "$RUN_START_NEW" "$RUN_END_NEW")"
+    
+    if [[ "$GPU_HOTSPOT_OLD" != "null" && "$GPU_HOTSPOT_NEW" != "null" ]]; then
+        hotspot_delta="$(awk -v o="$GPU_HOTSPOT_OLD" -v n="$GPU_HOTSPOT_NEW" 'BEGIN { printf "%.1f", n-o }')"
+        hotspot_color="$GREEN"
+        hotspot_warning=""
+        
+        # Check for critical temperatures
+        if (( $(echo "$GPU_HOTSPOT_NEW >= 110.0" | bc -l) )); then
+            hotspot_color="$RED"
+            hotspot_warning=" ⚠ CRITICAL: GPU hotspot overheating!"
+        elif (( $(echo "$GPU_HOTSPOT_NEW > 100.0" | bc -l) )); then
+            hotspot_color="$YELLOW"
+            hotspot_warning=" ⚠ WARNING: GPU hotspot temp high"
+        fi
+        
+        if (( $(echo "$hotspot_delta > 5.0" | bc -l) )); then
+            hotspot_color="$RED"
+            hotspot_warning="${hotspot_warning} ⚠ THERMAL DEGRADATION!"
+        elif (( $(echo "$hotspot_delta < -5.0" | bc -l) )); then
+            hotspot_color="$GREEN"
+            hotspot_warning=" ✓ Thermal improvement"
+        fi
+        
+        printf "  GPU hotspot:       %6.1f°C  ->  %6.1f°C  (Δ=%s%6.1f°C%s)%s\n" \
+            "$GPU_HOTSPOT_OLD" "$GPU_HOTSPOT_NEW" "$hotspot_color" "$hotspot_delta" "$NC" "$hotspot_warning"
+    fi
+    
+    echo
+    echo "  ${bold}Thermal Assessment:${normal}"
+    if [[ "$CPU_TEMP_NEW" != "null" && -n "$CPU_TEMP_NEW" ]]; then
+        if (( $(echo "$CPU_TEMP_NEW >= 100.0" | bc -l) )); then
+            echo -e "    ${RED}⚠ CRITICAL: CPU temperatures ≥ 100°C detected!${NC}"
+            echo -e "    ${RED}   → Check CPU cooler mounting and thermal paste immediately!${NC}"
+            echo -e "    ${RED}   → CPU throttling likely occurred, performance degraded!${NC}"
+        elif (( $(echo "$CPU_TEMP_NEW > 80.0" | bc -l) )); then
+            echo -e "    ${YELLOW}⚠ WARNING: CPU temperatures > 80°C - consider improving cooling${NC}"
+        fi
+    fi
+    
+    if [[ "$GPU_TEMP_NEW" != "null" && -n "$GPU_TEMP_NEW" ]]; then
+        if (( $(echo "$GPU_TEMP_NEW >= 95.0" | bc -l) )); then
+            echo -e "    ${RED}⚠ CRITICAL: GPU temperatures ≥ 95°C detected!${NC}"
+            echo -e "    ${RED}   → Check GPU cooler and thermal paste immediately!${NC}"
+            echo -e "    ${RED}   → GPU throttling likely occurred, performance degraded!${NC}"
+        elif (( $(echo "$GPU_TEMP_NEW > 85.0" | bc -l) )); then
+            echo -e "    ${YELLOW}⚠ WARNING: GPU temperatures > 85°C - consider improving cooling${NC}"
+        fi
+    fi
+    
+    if [[ "$GPU_HOTSPOT_NEW" != "null" && -n "$GPU_HOTSPOT_NEW" ]]; then
+        if (( $(echo "$GPU_HOTSPOT_NEW >= 110.0" | bc -l) )); then
+            echo -e "    ${RED}⚠ CRITICAL: GPU hotspot ≥ 110°C detected!${NC}"
+            echo -e "    ${RED}   → GPU thermal throttling likely occurred!${NC}"
+        fi
+    fi
+    
+    echo
+else
+    echo "  (Sensor data not available for thermal comparison)"
+    echo
+fi
+
+# Check fan_status from .ghul_host_id.json and show warning if unattainable
+FAN_STATUS="$(jq -r '.fan_status // "unknown"' "$HOST_ID_FILE" 2>/dev/null || echo "unknown")"
+if [[ "$FAN_STATUS" == "unattainable" ]]; then
+    echo
+    echo -e "${YELLOW}⚠ Fan monitoring: NOT AVAILABLE${NC}"
+    echo -e "${YELLOW}  The SuperIO chip on this mainboard cannot be accessed by Linux.${NC}"
+    echo -e "${YELLOW}  This is likely due to proprietary ACPI control that only works on Microsoft Windows.${NC}"
+    echo -e "${YELLOW}  Fan RPM values are not available, but fans are still working normally.${NC}"
+    echo
+fi
 
 echo
 echo "== Done =="

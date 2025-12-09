@@ -22,6 +22,7 @@ export LC_NUMERIC=C
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULT_DIR="${BASE}/results"
 SENSOR_DIR="${BASE}/logs/sensors"
+HOST_ID_FILE="${BASE}/.ghul_host_id.json"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -319,6 +320,20 @@ segment_report() {
   metric_stats "Case fan3 (RPM)"        "fan3_rpm"        "$start_epoch" "$end_epoch"
   metric_stats "Case fan4 (RPM)"        "fan4_rpm"        "$start_epoch" "$end_epoch"
   metric_stats "Case fan5 (RPM)"        "fan5_rpm"        "$start_epoch" "$end_epoch"
+  
+  # Check fan_status from .ghul_host_id.json and show warning if unattainable
+  FAN_STATUS="$(jq -r '.fan_status // "unknown"' "$HOST_ID_FILE" 2>/dev/null || echo "unknown")"
+  if [[ "$FAN_STATUS" == "unattainable" ]]; then
+    YELLOW=$'\033[1;33m'
+    NC=$'\033[0m'
+    echo
+    echo -e "${YELLOW}  ⚠ Fan monitoring: NOT AVAILABLE${NC}"
+    echo -e "${YELLOW}    The SuperIO chip on this mainboard cannot be accessed by Linux.${NC}"
+    echo -e "${YELLOW}    This is likely due to proprietary ACPI control that only works on Microsoft Windows.${NC}"
+    echo -e "${YELLOW}    Fan RPM values show as 'n/a' above, but fans are still working normally.${NC}"
+    echo
+  fi
+  
   all_storage_temp_stats "$start_epoch" "$end_epoch"
 }
 
@@ -366,6 +381,7 @@ echo "OS / Kernel: ${OS_STR} / ${KERNEL_STR}"
 echo "CPU:         ${CPU_STR}"
 echo "GPU:         ${GPU_STR}"
 echo "RAM total:   ${RAM_GIB} GiB"
+echo "Kernel:      ${KERNEL_STR}"
 echo
 echo "== Run timing =="
 echo "run_start epoch: ${RUN_START_EPOCH}"
@@ -386,6 +402,20 @@ metric_stats "Case fan2 (RPM)"        "fan2_rpm"        "$RUN_START_EPOCH" "$SEN
 metric_stats "Case fan3 (RPM)"        "fan3_rpm"        "$RUN_START_EPOCH" "$SENS_LAST_TS"
 metric_stats "Case fan4 (RPM)"        "fan4_rpm"        "$RUN_START_EPOCH" "$SENS_LAST_TS"
 metric_stats "Case fan5 (RPM)"        "fan5_rpm"        "$RUN_START_EPOCH" "$SENS_LAST_TS"
+
+# Check fan_status from .ghul_host_id.json and show warning if unattainable
+FAN_STATUS="$(jq -r '.fan_status // "unknown"' "$HOST_ID_FILE" 2>/dev/null || echo "unknown")"
+if [[ "$FAN_STATUS" == "unattainable" ]]; then
+  YELLOW=$'\033[1;33m'
+  NC=$'\033[0m'
+  echo
+  echo -e "${YELLOW}⚠ Fan monitoring: NOT AVAILABLE${NC}"
+  echo -e "${YELLOW}  The SuperIO chip on this mainboard cannot be accessed by Linux.${NC}"
+  echo -e "${YELLOW}  This is likely due to proprietary ACPI control that only works on Microsoft Windows.${NC}"
+  echo -e "${YELLOW}  Fan RPM values show as 'n/a' above, but fans are still working normally.${NC}"
+  echo
+fi
+
 all_storage_temp_stats "$RUN_START_EPOCH" "$SENS_LAST_TS"
 
 segment_report "storage_start" "Storage tests"

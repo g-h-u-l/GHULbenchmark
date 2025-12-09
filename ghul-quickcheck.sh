@@ -45,6 +45,10 @@ jqr() {
 
 # ---------- preflight ----------------------------------------------------------
 
+# Get absolute path of GHULbenchmark root (this script's directory)
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOST_ID_FILE="${BASE}/.ghul_host_id.json"
+
 if [[ ! -d "results" || ! -d "logs" ]]; then
   red "[GHUL] Please run this script from your GHULbenchmark directory."
   echo "[GHUL] Expected ./results and ./logs here."
@@ -153,6 +157,26 @@ else
   ram_speed_str="${ram_speed_mts} MT/s (${ram_speed_mhz} MHz)"
 fi
 
+# Count RAM modules and channels (needed for rating)
+ram_module_count=$(jq '[.ram.memory_devices[]
+                         | select(.size // "" | test("No Module Installed") | not)
+                       ] | length' "$RESULT_FILE")
+
+# Extract channels from locator (e.g. "ChannelA-DIMM0" -> "A", "ChannelB-DIMM1" -> "B")
+ram_channel_count=$(jq '[.ram.memory_devices[]
+                         | select(.size // "" | test("No Module Installed") | not)
+                         | (.locator // "")
+                         | match("Channel([A-Z])") | .captures[0].string
+                       ] | unique | length' "$RESULT_FILE" 2>/dev/null || echo "0")
+
+# Fallback: if no channels found in locator, try bank_locator
+if [[ "$ram_channel_count" == "0" || -z "$ram_channel_count" ]]; then
+  ram_channel_count=$(jq '[.ram.memory_devices[]
+                           | select(.size // "" | test("No Module Installed") | not)
+                           | (.bank_locator // "" | split(" ") | last)
+                         ] | unique | length' "$RESULT_FILE" 2>/dev/null || echo "0")
+fi
+
 
 # NET assessment
 tcp_mbps="$(jqr '.network.tcp_mbps // 0' "$RESULT_FILE")"
@@ -217,14 +241,37 @@ fi
 
 rate_ram="unknown"
 ram_bw="$(printf '%.1f' "$mbw_gib" 2>/dev/null || echo 0)"
+
+# Check if fully populated dual-channel (4 DIMMs in 2 channels)
+is_fully_populated_dual=0
+if (( ram_module_count == 4 && ram_channel_count == 2 )); then
+  is_fully_populated_dual=1
+fi
+
 if (( $(printf "%.0f" "$ram_bw") >= 35 )); then
-  rate_ram="Very high RAM bandwidth – tuned DDR4 or modern DDR5-level."
+  if (( is_fully_populated_dual == 1 )); then
+    rate_ram="Very high RAM bandwidth – tuned DDR4 or modern DDR5-level. Fully populated dual-channel configuration is optimal."
+  else
+    rate_ram="Very high RAM bandwidth – tuned DDR4 or modern DDR5-level."
+  fi
 elif (( $(printf "%.0f" "$ram_bw") >= 20 )); then
-  rate_ram="Good RAM bandwidth – absolutely fine for current gaming."
+  if (( is_fully_populated_dual == 1 )); then
+    rate_ram="Good RAM bandwidth – fully populated dual-channel configuration is optimal for gaming."
+  else
+    rate_ram="Good RAM bandwidth – absolutely fine for current gaming."
+  fi
 elif (( $(printf "%.0f" "$ram_bw") >= 10 )); then
-  rate_ram="Decent RAM bandwidth – fine for gaming, but faster kits or tuning could improve 1% lows."
+  if (( is_fully_populated_dual == 1 )); then
+    rate_ram="Decent RAM bandwidth – fully populated dual-channel is good, but faster RAM speed or better timings could improve 1% lows."
+  else
+    rate_ram="Decent RAM bandwidth – fine for gaming, but faster kits or tuning could improve 1% lows."
+  fi
 elif (( $(printf "%.0f" "$ram_bw") >= 6 )); then
-  rate_ram="Moderate RAM bandwidth – still okay for gaming but could be improved."
+  if (( is_fully_populated_dual == 1 )); then
+    rate_ram="Moderate RAM bandwidth – fully populated dual-channel is good, but RAM speed or timings could be improved."
+  else
+    rate_ram="Moderate RAM bandwidth – still okay for gaming but could be improved."
+  fi
 elif (( $(printf "%.0f" "$ram_bw") > 0 )); then
   rate_ram="Low RAM bandwidth – configuration or RAM speed may significantly limit modern GPUs."
 else
@@ -266,7 +313,22 @@ echo "Timestamp:      $ts"
 echo "OS / Kernel:    $os  /  $kernel"
 echo "CPU:            $cpu_model  (${threads} threads)"
 echo "RAM (physical): ${mem_gib} GiB"
-echo "GPU:            ${gpu_man} ${gpu_model}"
+echo "Kernel:         ${kernel}"
+# Check if gpu_model already contains the manufacturer name to avoid duplication
+gpu_display=""
+if [[ "$gpu_model" != "unknown" && -n "$gpu_model" ]]; then
+  # If gpu_model already starts with the manufacturer name, use only gpu_model
+  if [[ "$gpu_man" != "unknown" && -n "$gpu_man" ]] && echo "$gpu_model" | grep -qi "^${gpu_man}"; then
+    gpu_display="$gpu_model"
+  else
+    # Otherwise combine manufacturer and model
+    gpu_display="${gpu_man} ${gpu_model}"
+  fi
+else
+  # Fallback if model is unknown
+  gpu_display="${gpu_man} ${gpu_model}"
+fi
+echo "GPU:            ${gpu_display}"
 echo "Mainboard:      ${host_mb_vendor} / ${host_mb_product}"
 
 headline "CPU assessment"
@@ -295,7 +357,8 @@ if [[ -n "$SENS_FILE" && -f "$SENS_FILE" ]]; then
       
       if (( $(echo "$cpu_max >= 100.0" | bc -l) )); then
         echo "$(red "CPU temperature:     max=${cpu_max}°C, avg=${cpu_avg}°C")"
-        echo "$(red "                     ⚠ CRITICAL: CPU overheating! Check thermal paste and cooling immediately!")"
+        echo "$(red "                     ⚠ CRITICAL: CPU overheating (≥100°C)! Check thermal paste and cooling immediately!")"
+        echo "$(red "                     ⚠ CPU THROTTLING LIKELY OCCURRED - Performance degraded!")"
       elif (( $(echo "$cpu_max > 80.0" | bc -l) )); then
         echo "$(yellow "CPU temperature:     max=${cpu_max}°C, avg=${cpu_avg}°C")"
         echo "$(yellow "                     ⚠ WARNING: CPU temp high, check cooling")"
@@ -317,17 +380,7 @@ echo
 ############################################
 # RAM layout / channels / per-module info
 ############################################
-
-# Count populated modules (size contains "GB")
-ram_module_count=$(jq '[.ram.memory_devices[]
-                         | select(.size // "" | test("No Module Installed") | not)
-                       ] | length' "$RESULT_FILE")
-
-# Count distinct channels from bank_locator, e.g. "P0 CHANNEL A" -> "A"
-ram_channel_count=$(jq '[.ram.memory_devices[]
-                         | select(.size // "" | test("No Module Installed") | not)
-                         | (.bank_locator // "" | split(" ") | last)
-                       ] | unique | length' "$RESULT_FILE")
+# Note: ram_module_count and ram_channel_count are already calculated above for rating
 
 dual_info="Unknown RAM layout"
 
@@ -338,7 +391,12 @@ elif (( ram_module_count == 1 )); then
 elif (( ram_channel_count >= 3 )); then
   dual_info="${ram_module_count} modules across ${ram_channel_count} channels – multi-channel (3+), very likely optimal."
 elif (( ram_channel_count == 2 )); then
-  dual_info="${ram_module_count} modules across 2 channels – dual-channel very likely active."
+  # Special case: 4 DIMMs in 2 channels = fully populated dual-channel
+  if (( ram_module_count == 4 )); then
+    dual_info="4 DIMMs in 2 channels (dual-channel fully populated)"
+  else
+    dual_info="${ram_module_count} modules across 2 channels – dual-channel very likely active."
+  fi
 else
   dual_info="${ram_module_count} modules – layout is mixed, dual-channel status unclear."
 fi
@@ -402,7 +460,8 @@ if [[ -n "$SENS_FILE" && -f "$SENS_FILE" ]]; then
       
       if (( $(echo "$gpu_max >= 95.0" | bc -l) )); then
         echo "$(red "GPU edge temp:        max=${gpu_max}°C, avg=${gpu_avg}°C")"
-        echo "$(red "                     ⚠ CRITICAL: GPU overheating! Check thermal paste and cooling immediately!")"
+        echo "$(red "                     ⚠ CRITICAL: GPU overheating (≥95°C)! Check thermal paste and cooling immediately!")"
+        echo "$(red "                     ⚠ GPU THROTTLING LIKELY OCCURRED - Performance degraded!")"
       elif (( $(echo "$gpu_max > 85.0" | bc -l) )); then
         echo "$(yellow "GPU edge temp:        max=${gpu_max}°C, avg=${gpu_avg}°C")"
         echo "$(yellow "                     ⚠ WARNING: GPU temp high, check cooling")"
@@ -424,7 +483,8 @@ if [[ -n "$SENS_FILE" && -f "$SENS_FILE" ]]; then
       
       if (( $(echo "$hotspot_max >= 110.0" | bc -l) )); then
         echo "$(red "GPU hotspot temp:     max=${hotspot_max}°C, avg=${hotspot_avg}°C")"
-        echo "$(red "                     ⚠ CRITICAL: GPU hotspot overheating! Check thermal paste and cooling immediately!")"
+        echo "$(red "                     ⚠ CRITICAL: GPU hotspot overheating (≥110°C)! Check thermal paste and cooling immediately!")"
+        echo "$(red "                     ⚠ GPU THERMAL THROTTLING LIKELY OCCURRED!")"
       elif (( $(echo "$hotspot_max > 100.0" | bc -l) )); then
         echo "$(yellow "GPU hotspot temp:     max=${hotspot_max}°C, avg=${hotspot_avg}°C")"
         echo "$(yellow "                     ⚠ WARNING: GPU hotspot temp high, check cooling")"
@@ -471,121 +531,112 @@ echo "Internet connection: $rate_inet"
 
 headline "Storage assessment"
 
-# Initialize storage rating
-rate_storage="No storage benchmark data available."
-
 # Check if storage data exists
 storage_count=$(jq '[.storage[]?] | length' "$RESULT_FILE" 2>/dev/null || echo 0)
 
 if (( storage_count == 0 )); then
   yellow "No storage benchmark data available."
 else
-  # Display storage devices with performance metrics
-  jq -r '
-    .storage[]?
-    | "Device:             \(.device // "unknown")"
-    + " (\(.model // "unknown model"))"
-    + "\n  Mount point:        \(.mount_point // "n/a")"
-    + "\n  Sequential read:    \(.sequential_read_mbps // 0) MB/s"
-    + "\n  Sequential write:   \(.sequential_write_mbps // 0) MB/s"
-    + "\n  Random 4K read:      \(.random_4k_read_mbps // 0) MB/s"
-    + "\n  Random 4K write:     \(.random_4k_write_mbps // 0) MB/s"
-  ' "$RESULT_FILE"
+  # Check for NVMe and SATA devices
+  has_nvme=0
+  has_sata=0
   
-  echo
+  # Check if any device is NVMe (device name starts with "nvme")
+  if jq -e '[.storage[]? | select(.device // "" | test("^nvme"))] | length > 0' "$RESULT_FILE" >/dev/null 2>&1; then
+    has_nvme=1
+  fi
   
-  # Get storage temperatures from sensor log if available
+  # Check if any device is SATA (device name starts with "sd" or "hd")
+  if jq -e '[.storage[]? | select(.device // "" | test("^(sd|hd)"))] | length > 0' "$RESULT_FILE" >/dev/null 2>&1; then
+    has_sata=1
+  fi
+  
+  # Get timeline for temperature lookup
+  RUN_START_EPOCH="$(jq -r '.timeline[]? | select(.name=="run_start") | .epoch' "$RESULT_FILE" | head -n1 || jq -r '.timeline[0].epoch // empty' "$RESULT_FILE" || echo "")"
+  SENS_LAST_TS=""
   if [[ -n "$SENS_FILE" && -f "$SENS_FILE" ]]; then
-    # Get timeline from benchmark JSON
-    RUN_START_EPOCH="$(jq -r '.timeline[]? | select(.name=="run_start") | .epoch' "$RESULT_FILE" | head -n1 || jq -r '.timeline[0].epoch // empty' "$RESULT_FILE" || echo "")"
     SENS_LAST_TS="$(jq -r 'select(.timestamp != null) | .timestamp' "$SENS_FILE" | tail -n1 || echo "")"
+  fi
+  
+  # Display each storage device with performance + temperature
+  # Use jq -c to output compact JSON, one object per line
+  jq -c '.storage[]?' "$RESULT_FILE" | while IFS= read -r storage_json; do
+    device="$(echo "$storage_json" | jq -r '.device // "unknown"')"
+    model="$(echo "$storage_json" | jq -r '.model // "unknown model"')"
+    mount_point="$(echo "$storage_json" | jq -r '.mount_point // "n/a"')"
+    seq_read="$(echo "$storage_json" | jq -r '.sequential_read_mbps // 0')"
+    seq_write="$(echo "$storage_json" | jq -r '.sequential_write_mbps // 0')"
+    rand4k_read="$(echo "$storage_json" | jq -r '.random_4k_read_mbps // 0')"
+    rand4k_write="$(echo "$storage_json" | jq -r '.random_4k_write_mbps // 0')"
     
-    if [[ -n "$RUN_START_EPOCH" && -n "$SENS_LAST_TS" ]]; then
-      # Get all storage devices from sensor log
-      storage_devices=$(jq -r '
-        select(.timestamp >= ($start | tonumber) and .timestamp <= ($end | tonumber))
-        | .storage_temps // {}
-        | keys[]
-      ' --arg start "$RUN_START_EPOCH" --arg end "$SENS_LAST_TS" "$SENS_FILE" 2>/dev/null | sort -u || true)
-      
-      if [[ -n "$storage_devices" ]]; then
-        echo "Storage temperatures:"
-        while IFS= read -r device; do
-          [[ -z "$device" ]] && continue
-          
-          # Get min/max/avg for this device
-          values=$(jq -r --argjson s "$RUN_START_EPOCH" --argjson e "$SENS_LAST_TS" --arg dev "$device" '
-            select(.timestamp >= $s and .timestamp <= $e)
-            | .storage_temps[$dev] // empty
-            | select(. != null)
-          ' "$SENS_FILE" 2>/dev/null || true)
-          
-          if [[ -n "$values" ]]; then
-            # Calculate stats
-            min=$(echo "$values" | awk 'BEGIN{min=999} {if($1<min) min=$1} END{print min}')
-            max=$(echo "$values" | awk 'BEGIN{max=0} {if($1>max) max=$1} END{print max}')
-            avg=$(echo "$values" | awk '{sum+=$1; cnt++} END{if(cnt>0) printf "%.1f", sum/cnt; else print "0"}')
-            
-            # Get label for device
-            label=""
-            mount_point=$(df -T 2>/dev/null | awk -v base="/dev/${device}" '$1 ~ "^" base "[0-9]+" && $NF != "/" && $NF !~ /\/boot/ {print $NF; exit}')
-            if [[ -z "$mount_point" ]]; then
-              base_device=$(echo "$device" | sed -E 's/([a-z]+)([0-9]+).*/\1/')
-              model=$(lsblk -o NAME,MODEL -d -n 2>/dev/null | awk -v dev="$base_device" '$1 == dev {for(i=2;i<=NF;i++) printf "%s ", $i; print ""; exit}' | sed 's/[[:space:]]*$//')
-              if [[ -n "$model" ]]; then
-                label=" ($model)"
-              fi
-            else
-              label=" ($(basename "$mount_point"))"
-            fi
-            
-            # Temperature rating
-            temp_rating=""
-            temp_warning=""
-            if (( $(echo "$max >= 70.0" | bc -l) )); then
-              temp_rating="$(red "CRITICAL")"
-              temp_warning=" – ⚠ CRITICAL: Storage overheating! Check airflow immediately!"
-            elif (( $(echo "$max > 55.0" | bc -l) )); then
-              temp_rating="$(yellow "WARNING")"
-              temp_warning=" – ⚠ WARNING: Storage temp high, check airflow"
-            else
-              temp_rating="$(green "Good")"
-            fi
-            
-            echo "  ${device}${label}: min=${min}°C, avg=${avg}°C, max=${max}°C ${temp_rating}${temp_warning}"
-          fi
-        done <<<"$storage_devices"
-        echo
-      fi
+    # Determine device type
+    device_type=""
+    if echo "$device" | grep -qE '^nvme'; then
+      device_type="NVMe"
+    elif echo "$device" | grep -qE '^(sd|hd)'; then
+      device_type="SATA"
+    else
+      device_type="Storage"
     fi
+    
+    # Get base device name for temperature lookup (nvme0n1p2 -> nvme0n1, sda1 -> sda)
+    base_device=""
+    if echo "$device" | grep -qE '^nvme'; then
+      base_device="$(echo "$device" | sed -E 's/(nvme[0-9]+n[0-9]+).*/\1/')"
+    else
+      base_device="$(echo "$device" | sed -E 's/([a-z]+)([0-9]+).*/\1/')"
+    fi
+    
+    echo "Device:             ${device} (${model})"
+    echo "  Type:             ${device_type}"
+    echo "  Mount point:      ${mount_point}"
+    echo "  Sequential read:  ${seq_read} MB/s"
+    echo "  Sequential write: ${seq_write} MB/s"
+    echo "  Random 4K read:   ${rand4k_read} MB/s"
+    echo "  Random 4K write:  ${rand4k_write} MB/s"
+    
+    # Get temperature if available
+    if [[ -n "$SENS_FILE" && -f "$SENS_FILE" && -n "$RUN_START_EPOCH" && -n "$SENS_LAST_TS" && -n "$base_device" ]]; then
+      temp_values=$(jq -r --argjson s "$RUN_START_EPOCH" --argjson e "$SENS_LAST_TS" --arg dev "$base_device" '
+        select(.timestamp >= $s and .timestamp <= $e)
+        | .storage_temps[$dev] // empty
+        | select(. != null)
+      ' "$SENS_FILE" 2>/dev/null || true)
+      
+      if [[ -n "$temp_values" ]]; then
+        temp_min=$(echo "$temp_values" | awk 'BEGIN{min=999} {if($1<min) min=$1} END{print min}')
+        temp_max=$(echo "$temp_values" | awk 'BEGIN{max=0} {if($1>max) max=$1} END{print max}')
+        temp_avg=$(echo "$temp_values" | awk '{sum+=$1; cnt++} END{if(cnt>0) printf "%.1f", sum/cnt; else print "0"}')
+        
+        temp_warning=""
+        if (( $(echo "$temp_max >= 70.0" | bc -l) )); then
+          temp_warning=" $(red "⚠ CRITICAL: ≥70°C!")"
+        elif (( $(echo "$temp_max > 55.0" | bc -l) )); then
+          temp_warning=" $(yellow "⚠ WARNING: >55°C")"
+        fi
+        
+        echo "  Temperature:       min=${temp_min}°C, avg=${temp_avg}°C, max=${temp_max}°C${temp_warning}"
+      else
+        echo "  Temperature:       n/a"
+      fi
+    else
+      echo "  Temperature:       n/a"
+    fi
+    
+    echo
+  done
+  
+  # Overall storage rating
+  echo "Storage rating:"
+  if (( has_nvme == 1 )); then
+    echo "  System drive:      NVMe-class performance – excellent."
   fi
-  
-  # Storage performance rating (based on sequential read/write)
-  # Get best performing device for overall rating
-  best_seq_read=$(jq '[.storage[]? | .sequential_read_mbps // 0] | max' "$RESULT_FILE" 2>/dev/null || echo 0)
-  best_seq_write=$(jq '[.storage[]? | .sequential_write_mbps // 0] | max' "$RESULT_FILE" 2>/dev/null || echo 0)
-  best_rand4k_read=$(jq '[.storage[]? | .random_4k_read_mbps // 0] | max' "$RESULT_FILE" 2>/dev/null || echo 0)
-  
-  n_seq_read=$(printf "%.0f" "${best_seq_read:-0}" 2>/dev/null || echo 0)
-  n_seq_write=$(printf "%.0f" "${best_seq_write:-0}" 2>/dev/null || echo 0)
-  n_rand4k_read=$(printf "%.0f" "${best_rand4k_read:-0}" 2>/dev/null || echo 0)
-  
-  rate_storage="unknown"
-  if (( n_seq_read >= 3000 && n_seq_write >= 2000 )); then
-    rate_storage="Excellent storage performance – NVMe-level speeds, perfect for gaming and large file operations."
-  elif (( n_seq_read >= 500 && n_seq_write >= 400 )); then
-    rate_storage="Very good storage performance – modern SATA SSD-level, excellent for gaming."
-  elif (( n_seq_read >= 200 && n_seq_write >= 150 )); then
-    rate_storage="Good storage performance – decent SATA SSD, fine for gaming but loading times may be noticeable."
-  elif (( n_seq_read >= 100 && n_seq_write >= 80 )); then
-    rate_storage="Moderate storage performance – older SSD or fast HDD, acceptable for gaming but consider upgrade."
-  elif (( n_seq_read > 0 || n_seq_write > 0 )); then
-    rate_storage="Low storage performance – likely HDD or very old SSD, will significantly impact loading times."
-  else
-    rate_storage="No storage benchmark data available."
+  if (( has_sata == 1 )); then
+    echo "  Game library drive: SATA SSD-class performance – still very good for gaming."
   fi
-  
-  echo "Storage rating:      $rate_storage"
+  if (( has_nvme == 0 && has_sata == 0 )); then
+    echo "  Storage:           Performance data available, see device details above."
+  fi
 fi
 
 headline "GHUL overall impression"
@@ -594,11 +645,76 @@ echo "Summary:"
 echo "- CPU:     $rate_cpu"
 echo "- RAM:     $rate_ram"
 echo "- GPU:     $rate_gpu"
-if [[ -n "${rate_storage:-}" && "$rate_storage" != "No storage benchmark data available." ]]; then
-  echo "- Storage: $rate_storage"
+# Storage summary is already shown in Storage assessment section
+if (( storage_count > 0 )); then
+  if (( has_nvme == 1 )); then
+    echo "- Storage: NVMe-class (excellent)"
+  elif (( has_sata == 1 )); then
+    echo "- Storage: SATA SSD-class (very good)"
+  else
+    echo "- Storage: See device details above"
+  fi
 fi
 echo "- NET:     $rate_net / $rate_inet"
 echo
+
+# Check for critical thermal issues and throttling
+if [[ -n "$SENS_FILE" && -f "$SENS_FILE" ]]; then
+  RUN_START_EPOCH="$(jq -r '.timeline[]? | select(.name=="run_start") | .epoch' "$RESULT_FILE" | head -n1 || jq -r '.timeline[0].epoch // empty' "$RESULT_FILE" || echo "")"
+  SENS_LAST_TS="$(jq -r 'select(.timestamp != null) | .timestamp' "$SENS_FILE" | tail -n1 || echo "")"
+  
+  if [[ -n "$RUN_START_EPOCH" && -n "$SENS_LAST_TS" ]]; then
+    cpu_max_check="$(jq -r --argjson s "$RUN_START_EPOCH" --argjson e "$SENS_LAST_TS" '
+      select(.timestamp >= $s and .timestamp <= $e)
+      | .cpu_temp_c // empty
+      | select(. != null)
+    ' "$SENS_FILE" 2>/dev/null | awk 'BEGIN{max=0} {if($1>max) max=$1} END{print max}' || echo "0")"
+    
+    gpu_max_check="$(jq -r --argjson s "$RUN_START_EPOCH" --argjson e "$SENS_LAST_TS" '
+      select(.timestamp >= $s and .timestamp <= $e)
+      | .gpu_temp_c // empty
+      | select(. != null)
+    ' "$SENS_FILE" 2>/dev/null | awk 'BEGIN{max=0} {if($1>max) max=$1} END{print max}' || echo "0")"
+    
+    gpu_hotspot_check="$(jq -r --argjson s "$RUN_START_EPOCH" --argjson e "$SENS_LAST_TS" '
+      select(.timestamp >= $s and .timestamp <= $e)
+      | .gpu_hotspot_c // empty
+      | select(. != null)
+    ' "$SENS_FILE" 2>/dev/null | awk 'BEGIN{max=0} {if($1>max) max=$1} END{print max}' || echo "0")"
+    
+    has_critical=0
+    if (( $(echo "$cpu_max_check >= 100.0" | bc -l 2>/dev/null || echo 0) )); then
+      has_critical=1
+    fi
+    if (( $(echo "$gpu_max_check >= 95.0" | bc -l 2>/dev/null || echo 0) )); then
+      has_critical=1
+    fi
+    if (( $(echo "$gpu_hotspot_check >= 110.0" | bc -l 2>/dev/null || echo 0) )); then
+      has_critical=1
+    fi
+    
+    if [[ $has_critical -eq 1 ]]; then
+      echo
+      red "⚠ CRITICAL THERMAL ISSUES DETECTED!"
+      red "  → CPU and/or GPU temperatures exceeded safe limits"
+      red "  → Thermal throttling likely occurred - performance degraded"
+      red "  → Check cooling, thermal paste, and cooler mounting immediately!"
+      echo
+    fi
+  fi
+fi
+
+# Check fan_status from .ghul_host_id.json and show warning if unattainable
+FAN_STATUS="$(jq -r '.fan_status // "unknown"' "$HOST_ID_FILE" 2>/dev/null || echo "unknown")"
+if [[ "$FAN_STATUS" == "unattainable" ]]; then
+  echo
+  yellow "⚠ Fan monitoring: NOT AVAILABLE"
+  yellow "  The SuperIO chip on this mainboard cannot be accessed by Linux."
+  yellow "  This is likely due to proprietary ACPI control that only works on Microsoft Windows."
+  yellow "  Fan RPM values are not available, but fans are still working normally."
+  echo
+fi
+
 green "GHUL verdict: This machine is ready for Linux gaming – see details above for tuning ideas."
 echo "You can compare multiple JSON files over time to see the impact of upgrades and tweaks."
 echo
