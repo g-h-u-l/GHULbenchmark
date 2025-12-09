@@ -125,27 +125,7 @@ TS="$(date +%Y-%m-%d-%H-%M)"
 HOST="$(hostname)"
 OUTFILE="${OUTDIR}/${TS}-${HOST}.json"
 
-# Run timing metadata (for external sensor helpers)
-RUN_START_EPOCH="$(date +%s)"
-RUN_START_ISO="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-
 echo "== GHUL Benchmark (${HOST} @ ${TS}) =="
-
-# --------- Start sensor watch ---------------------------------------------------
-SENSORS_HELPER="${BASE}/tools/ghul-sensors-helper.sh"
-SENSORS_PIDFILE="${SENSORSDIR}/.ghul_sensors.pid"
-# Directory already created above, but ensure it exists
-mkdir -p "${SENSORSDIR}"
-
-echo "[GHUL] Starting sensors helper..."
-
-# Pass run timestamp and pidfile path into helper
-export GHUL_RUN_TS="$TS"
-export GHUL_SENSORS_PIDFILE="$SENSORS_PIDFILE"
-
-bash "$SENSORS_HELPER" &
-SENSORS_PID=$!
-sleep 1
 
 # --------- GHUL Host ID (optional, from .ghul_host_id.json) --------------------
 HOST_ID_FILE="${BASE}/.ghul_host_id.json"
@@ -176,12 +156,35 @@ TIMELINE_JSON='[]'
 
 mark_event() {
   local name="$1"
-  local ts_epoch
-  ts_epoch="$(date +%s)"
+  local ts_epoch="${2:-$(date +%s)}"  # Allow passing epoch as second argument
   TIMELINE_JSON="$(printf '%s' "$TIMELINE_JSON" \
     | jq --arg n "$name" --argjson t "$ts_epoch" '. + [{name:$n, epoch:$t}]')"
 }
-mark_event "run_start"
+
+# --------- Start sensor watch (synchronized with run_start) --------------------
+# Set run start epoch RIGHT BEFORE starting sensor helper for perfect sync
+RUN_START_EPOCH="$(date +%s)"
+RUN_START_ISO="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+SENSORS_HELPER="${BASE}/tools/ghul-sensors-helper.sh"
+SENSORS_PIDFILE="${SENSORSDIR}/.ghul_sensors.pid"
+# Directory already created above, but ensure it exists
+mkdir -p "${SENSORSDIR}"
+
+echo "[GHUL] Starting sensors helper..."
+
+# Pass run timestamp and pidfile path into helper
+export GHUL_RUN_TS="$TS"
+export GHUL_SENSORS_PIDFILE="$SENSORS_PIDFILE"
+
+# Start sensor helper in background
+bash "$SENSORS_HELPER" &
+SENSORS_PID=$!
+# Give sensor helper a moment to initialize (but don't wait too long)
+sleep 0.5
+
+# Mark run_start with the SAME epoch we used for sensor helper
+mark_event "run_start" "$RUN_START_EPOCH"
 
 # Safe numeric merge: pass string, cast inside jq
 jq_num_set() { # $1=json, $2=key, $3=value
@@ -217,51 +220,80 @@ cpu_model="${cpu_model:-unknown}"
 threads="$(cap nproc)"; threads="${threads:-0}"
 mem_total_kib="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"; mem_total_kib="${mem_total_kib:-0}"
 
-# OpenGL info (optional)
-gpu_renderer="missing"
-opengl_version="missing"
-if have glxinfo; then
-  gpu_renderer="$(cap glxinfo | awk -F: '
-    /OpenGL renderer/ {sub(/^ /,"",$2); print $2; exit}')"
-  opengl_version="$(cap glxinfo | awk -F: '
-    /OpenGL version/  {sub(/^ /,"",$2); print $2; exit}')"
-fi
-
 # ---- GPU manufacturer + model extraction ----
 gpu_man="unknown"
 gpu_model="unknown"
 gpu_vendor="unknown"  # v0.2: lowercase vendor for sensor detection (amd/nvidia/intel/unknown)
 
-if have lspci; then
-  # First VGA/3D card
-  l="$(LC_ALL=C lspci -nn | grep -Ei 'VGA compatible controller|3D controller' | head -n1 || true)"
-  if [[ -n "$l" ]]; then
-    # Hersteller
-    if echo "$l" | grep -qi 'NVIDIA'; then
-      gpu_man="NVIDIA"
-      gpu_vendor="nvidia"
-    elif echo "$l" | grep -qi 'AMD\|ATI'; then
-      gpu_man="AMD"
-      gpu_vendor="amd"
-    elif echo "$l" | grep -qi 'Intel'; then
-      gpu_man="Intel"
-      gpu_vendor="intel"
-    fi
-
-    # try to fetch model in square brackets (Radeon ...)
-    gpu_model="$(echo "$l" | sed -n 's/.*\[\(Radeon[^]]*\)\].*/\1/p')"
-
-    # Fallback: text after "controller:" without brackets
-    if [[ -z "$gpu_model" ]]; then
-      gpu_model="$(echo "$l" \
-        | sed -n 's/.*controller:[[:space:]]*\(.*\)/\1/p' \
-        | sed 's/\[[^]]*\]//g' \
-        | sed 's/(.*)//' \
-        | xargs)"
-    fi
-
-    [[ -z "$gpu_model" ]] && gpu_model="unknown"
+# Method 1: Try nvidia-smi first (most reliable for NVIDIA GPUs)
+if have nvidia-smi; then
+  gpu_model="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 | xargs || echo "")"
+  if [[ -n "$gpu_model" && "$gpu_model" != "" ]]; then
+    gpu_man="NVIDIA"
+    gpu_vendor="nvidia"
+    # gpu_model is already set from nvidia-smi
   fi
+fi
+
+# Method 2: Fallback to lspci if nvidia-smi didn't work or for non-NVIDIA GPUs
+if [[ "$gpu_model" == "unknown" || -z "$gpu_model" ]]; then
+  if have lspci; then
+    # First VGA/3D card
+    l="$(LC_ALL=C lspci -nn | grep -Ei 'VGA compatible controller|3D controller' | head -n1 || true)"
+    if [[ -n "$l" ]]; then
+      # Hersteller
+      if echo "$l" | grep -qi 'NVIDIA'; then
+        gpu_man="NVIDIA"
+        gpu_vendor="nvidia"
+      elif echo "$l" | grep -qi 'AMD\|ATI'; then
+        gpu_man="AMD"
+        gpu_vendor="amd"
+      elif echo "$l" | grep -qi 'Intel'; then
+        gpu_man="Intel"
+        gpu_vendor="intel"
+      fi
+
+      # try to fetch model in square brackets (Radeon ...)
+      gpu_model="$(echo "$l" | sed -n 's/.*\[\(Radeon[^]]*\)\].*/\1/p')"
+
+      # Fallback: text after "controller:" without brackets
+      if [[ -z "$gpu_model" ]]; then
+        gpu_model="$(echo "$l" \
+          | sed -n 's/.*controller:[[:space:]]*\(.*\)/\1/p' \
+          | sed 's/\[[^]]*\]//g' \
+          | sed 's/(.*)//' \
+          | xargs)"
+      fi
+
+      [[ -z "$gpu_model" ]] && gpu_model="unknown"
+    fi
+  fi
+fi
+
+# Final fallback: if still unknown, set to "unknown"
+[[ -z "$gpu_model" || "$gpu_model" == "" ]] && gpu_model="unknown"
+
+# OpenGL info (optional)
+# gpu_renderer should match gpu_model (clean GPU name without /PCIe/SSE2 suffixes)
+gpu_renderer="$gpu_model"
+opengl_version="missing"
+if have glxinfo; then
+  # If gpu_model is still unknown, try to extract from OpenGL renderer string
+  if [[ "$gpu_renderer" == "unknown" || -z "$gpu_renderer" ]]; then
+    # Extract GPU renderer name (remove /PCIe/SSE2 etc. suffixes)
+    gpu_renderer="$(cap glxinfo | awk -F: '
+      /OpenGL renderer/ {
+        sub(/^ /,"",$2);
+        # Remove everything after first "/" (e.g. "/PCIe/SSE2")
+        gsub(/\/.*$/,"",$2);
+        print $2;
+        exit
+      }')"
+    [[ -z "$gpu_renderer" ]] && gpu_renderer="unknown"
+  fi
+  
+  opengl_version="$(cap glxinfo | awk -F: '
+    /OpenGL version/  {sub(/^ /,"",$2); print $2; exit}')"
 fi
 
 
@@ -309,6 +341,7 @@ ENV_JSON="$(jq -n \
   --arg mb_ver   "$mb_ver" \
   --arg gpu_man  "$gpu_man" \
   --arg gpu_model "$gpu_model" \
+  --arg gpu_vend "$gpu_vendor" \
   --arg gh_id    "$GHUL_HOST_ID" \
   --arg gh_vend  "$GHUL_HOST_VENDOR" \
   --arg gh_prod  "$GHUL_HOST_PRODUCT" \
@@ -330,6 +363,7 @@ ENV_JSON="$(jq -n \
      },
      gpu_manufacturer: $gpu_man,
      gpu_model:        $gpu_model,
+     gpu_vendor:       $gpu_vend,
      gpu_renderer:     $gpu_rend,
      opengl_version:   $gl,
      ghul_host: {
