@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# GHUL Hellfire - Extreme Combined Stress Test (CPU + GPU + RAM)
-# WARNING: This is the ULTIMATE stress test - pushes everything to maximum!
-# This will test PSU, VRM, case cooling, and overall system stability
-# Use with EXTREME caution and ensure excellent cooling!
+# GHUL Hellfire - Full System Furnace Test (Cooler/PSU Test)
+# WARNING: This test will push CPU, RAM, GPU and Storage simultaneously
+# Use with caution and ensure adequate cooling and PSU capacity!
 
 set -euo pipefail
 
@@ -18,7 +17,7 @@ source "${SCRIPT_DIR}/hellfire-common.sh"
 
 # Test configuration
 HELLFIRE_TEST_NAME="cooler"
-DEFAULT_DURATION=300  # 5 minutes default
+DEFAULT_DURATION=180  # 3 minutes default
 DURATION="${1:-${DEFAULT_DURATION}}"
 
 # Validate duration
@@ -30,28 +29,46 @@ fi
 
 # Main function
 main() {
-  print_hellfire_header "COOLER STRESS TEST"
+  # Print extreme warning
+  print_hellfire_warning
   
-  red "🚨 CRITICAL WARNING: This is the ULTIMATE stress test!"
-  red "  This test will:"
-  yellow "  - Push ALL CPU cores to 100% load"
-  yellow "  - Push GPU to 100% load"
-  yellow "  - Use maximum available RAM"
-  yellow "  - Generate MAXIMUM heat (PSU, VRM, CPU, GPU)"
-  yellow "  - Test case cooling to the limit"
-  yellow "  - May cause thermal throttling or system instability"
-  yellow "  - Duration: ${DURATION} seconds"
-  echo
-  red "  ⚠ Ensure excellent cooling before proceeding!"
-  red "  ⚠ Monitor temperatures closely!"
+  yellow "This is a FULL SYSTEM FURNACE TEST - CPU, RAM, GPU and Storage will be stressed simultaneously."
+  yellow "This tests your case airflow, cooling solution and PSU under extreme combined load."
   echo
   
-  echo -n "Are you SURE you want to continue? Type 'HELLFIRE' to confirm: "
+  # Get confirmation (must be exactly "YES")
+  echo -n "> "
   read -r answer
-  if [[ "$answer" != "HELLFIRE" ]]; then
-    yellow "Test cancelled."
+  
+  if [[ "$answer" != "YES" ]]; then
+    echo
+    echo "Aborted."
+    echo
+    echo "Wise decision, traveler."
+    echo
     exit 0
   fi
+  
+  # Print start message
+  echo
+  echo "🔥 You have been warned."
+  echo
+  echo "Proceeding with GHUL Hellfire Cooler Test…"
+  echo
+  echo "This test will turn your entire system into a furnace."
+  echo "All components will be stressed simultaneously."
+  echo
+  echo "Good luck, brave warrior."
+  echo
+  echo "🔥🔥🔥"
+  echo
+  
+  # Print header
+  print_hellfire_header "COOLER FURNACE TEST"
+  
+  # Store test info for cleanup handler
+  export HELLFIRE_TEST_NAME="$HELLFIRE_TEST_NAME"
+  export HELLFIRE_DURATION="$DURATION"
   
   # Setup cleanup trap
   setup_cleanup_trap
@@ -59,118 +76,220 @@ main() {
   # Check temperatures before starting
   check_temps_before_start
   
-  # Countdown
-  countdown 10
+  # Get system info
+  local cores
+  cores="$(nproc)"
+  green "  Detected $cores CPU cores"
+  
+  local ram_total_kb
+  ram_total_kb="$(grep MemTotal /proc/meminfo | awk '{print $2}')"
+  local ram_total_gb
+  ram_total_gb="$(awk -v k="$ram_total_kb" 'BEGIN { printf "%.2f", k/1024/1024 }')"
+  green "  Total RAM: ${ram_total_gb} GiB"
+  
+  # Detect GPU vendor
+  local gpu_vendor
+  gpu_vendor="$(detect_gpu_vendor 2>/dev/null || echo "unknown")"
+  if [[ "$gpu_vendor" != "unknown" ]]; then
+    green "  Detected GPU vendor: $gpu_vendor"
+  else
+    yellow "  Warning: Could not detect GPU vendor - GPU stress may not work"
+  fi
+  
+  green "  Duration: ${DURATION} seconds"
+  echo
+  
+  countdown 5
   
   # Start sensor monitoring
   start_sensor_monitor "$HELLFIRE_TEST_NAME" "$DURATION"
   
-  # Get system info
-  local cores
-  cores="$(nproc)"
-  local ram_total_kb
-  ram_total_kb="$(grep MemTotal /proc/meminfo | awk '{print $2}')"
-  local ram_test_kb
-  ram_test_kb="$(awk -v t="$ram_total_kb" 'BEGIN { printf "%.0f", t*0.9 }')"
-  local gpu_vendor
-  gpu_vendor="$(detect_gpu_vendor 2>/dev/null || echo "unknown")"
-  
-  green "  System configuration:"
-  green "    CPU cores: $cores"
-  green "    RAM test: $(awk -v k="$ram_test_kb" 'BEGIN { printf "%.2f", k/1024/1024 }') GiB"
-  green "    GPU vendor: $gpu_vendor"
+  green "  Starting parallel stress loads..."
   echo
   
-  # Start all stress tests simultaneously
-  green "  Starting combined stress test..."
+  local cpu_pid=""
+  local ram_pid=""
+  local gpu_pid=""
+  local disk_pid=""
+  local monitor_pid=""
+  local test_status="PASS"
+  local abort_reason=""
   
-  local pids=()
-  
-  # 1. CPU stress
+  # Start CPU stress
   if have stress-ng; then
-    green "    Starting CPU stress..."
+    green "  Starting CPU stress (${cores} cores)..."
     stress-ng \
       --matrix "$cores" \
       --crypt "$cores" \
       --cpu "$cores" \
       --timeout "${DURATION}s" \
       --metrics-brief \
-      --log-file "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-cpu.log" &
-    pids+=($!)
-  fi
-  
-  # 2. RAM stress
-  if have stress-ng; then
-    green "    Starting RAM stress..."
-    stress-ng \
-      --vm "$cores" \
-      --vm-bytes "${ram_test_kb}K" \
-      --vm-keep \
-      --timeout "${DURATION}s" \
-      --metrics-brief \
-      --log-file "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-ram.log" &
-    pids+=($!)
-  fi
-  
-  # 3. GPU stress
-  if have gputest; then
-    green "    Starting GPU stress..."
-    gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /benchmark /print_score /run_time="${DURATION}" \
-      > "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-gpu.log" 2>&1 &
-    pids+=($!)
+      --log-file "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-cpu.log" \
+      >/dev/null 2>&1 &
+    cpu_pid=$!
+    export STRESS_PID="$cpu_pid"
+    green "    CPU stress started (PID: $cpu_pid)"
   else
-    yellow "    Warning: gputest not found, GPU stress skipped"
+    red "  Error: stress-ng not found!"
+    red "  Install with: sudo pacman -S stress-ng"
+    stop_sensor_monitor "$HELLFIRE_TEST_NAME"
+    exit 1
   fi
   
-  green "  All stress tests started (${#pids[@]} processes)"
-  green "  Monitoring for ${DURATION} seconds..."
+  # Start RAM stress (70% of RAM, min(8, cores) workers)
+  local vm_workers
+  vm_workers=$((cores < 8 ? cores : 8))
+  local ram_test_kb
+  ram_test_kb="$(awk -v t="$ram_total_kb" 'BEGIN { printf "%.0f", t*0.7 }')"
+  local ram_test_gb
+  ram_test_gb="$(awk -v k="$ram_test_kb" 'BEGIN { printf "%.2f", k/1024/1024 }')"
   
-  # Wait for all processes to complete
-  local failed=0
-  for pid in "${pids[@]}"; do
-    if ! wait "$pid" 2>/dev/null; then
-      failed=1
+  green "  Starting RAM stress (${ram_test_gb} GiB, ${vm_workers} workers)..."
+  stress-ng \
+    --vm "$vm_workers" \
+    --vm-bytes "${ram_test_kb}K" \
+    --vm-method all \
+    --vm-keep \
+    --timeout "${DURATION}s" \
+    --metrics-brief \
+    --log-file "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-ram.log" \
+    >/dev/null 2>&1 &
+  ram_pid=$!
+  green "    RAM stress started (PID: $ram_pid)"
+  
+  # Start GPU stress (moderate, msaa=2)
+  if [[ "$gpu_vendor" != "unknown" ]]; then
+    if have gputest; then
+      green "  Starting GPU stress (moderate, msaa=2, 1280x720)..."
+      gputest /test=fur /width=1280 /height=720 /msaa=2 /gpumon_terminal \
+        > "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-gpu.log" 2>&1 &
+      gpu_pid=$!
+      export GPUTEST_PID="$gpu_pid"
+      green "    GPU stress started (PID: $gpu_pid)"
+    elif have stress-ng && stress-ng --help 2>&1 | grep -q "gpu"; then
+      green "  Starting GPU stress (stress-ng)..."
+      stress-ng \
+        --gpu 1 \
+        --timeout "${DURATION}s" \
+        --metrics-brief \
+        --log-file "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-gpu.log" \
+        >/dev/null 2>&1 &
+      gpu_pid=$!
+      green "    GPU stress started (PID: $gpu_pid)"
+    else
+      yellow "  Warning: No GPU stress tool found - skipping GPU load"
     fi
+  fi
+  
+  # Optional: Start disk stress (disabled for now - hdd-opts needs correct syntax)
+  # if have stress-ng; then
+  #   green "  Starting disk stress (optional)..."
+  #   stress-ng \
+  #     --hdd 2 \
+  #     --hdd-opts wr-seq \
+  #     --timeout "${DURATION}s" \
+  #     --metrics-brief \
+  #     --log-file "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-disk.log" &
+  #   disk_pid=$!
+  #   green "    Disk stress started (PID: $disk_pid)"
+  # fi
+  
+  echo
+  
+  # Start combined safety monitoring
+  monitor_cooler_safety "$HELLFIRE_TEST_NAME" "$DURATION" "$cpu_pid" "$gpu_pid" "$gpu_vendor" &
+  monitor_pid=$!
+  
+  # Wait for duration
+  local start_time
+  start_time="$(date +%s)"
+  local end_time
+  end_time=$((start_time + DURATION))
+  
+  green "  Test running... (${DURATION} seconds)"
+  echo
+  
+  # Wait for duration or until process dies
+  while [[ $(date +%s) -lt $end_time ]]; do
+    # Check if any critical process died
+    if [[ -n "$cpu_pid" ]] && ! kill -0 "$cpu_pid" 2>/dev/null; then
+      yellow "  CPU stress process ended early"
+      break
+    fi
+    if [[ -n "$ram_pid" ]] && ! kill -0 "$ram_pid" 2>/dev/null; then
+      yellow "  RAM stress process ended early"
+      break
+    fi
+    if [[ -n "$gpu_pid" ]] && ! kill -0 "$gpu_pid" 2>/dev/null; then
+      yellow "  GPU stress process ended early"
+      break
+    fi
+    sleep 1
   done
   
-  if [[ $failed -eq 1 ]]; then
-    yellow "  Warning: Some stress tests may have failed"
+  # Kill all stress processes
+  green "  Test duration reached, terminating stress processes..."
+  
+  # Kill CPU/RAM (stress-ng will exit cleanly with timeout, but kill anyway)
+  if [[ -n "$cpu_pid" ]]; then
+    kill "$cpu_pid" 2>/dev/null || true
+    wait "$cpu_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$ram_pid" ]]; then
+    kill "$ram_pid" 2>/dev/null || true
+    wait "$ram_pid" 2>/dev/null || true
+  fi
+  
+  # Kill GPU (gputest needs aggressive kill)
+  if [[ -n "$gpu_pid" ]]; then
+    kill "$gpu_pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$gpu_pid" 2>/dev/null; then
+      kill -TERM "$gpu_pid" 2>/dev/null || true
+      sleep 1
+    fi
+    if kill -0 "$gpu_pid" 2>/dev/null; then
+      kill -9 "$gpu_pid" 2>/dev/null || true
+    fi
+    pkill -P "$gpu_pid" 2>/dev/null || true
+    pkill -9 -P "$gpu_pid" 2>/dev/null || true
+    pkill -f "gputest.*fur" 2>/dev/null || true
+    sleep 0.5
+    pkill -9 -f "gputest.*fur" 2>/dev/null || true
+    wait "$gpu_pid" 2>/dev/null || true
+  fi
+  
+  # Kill disk stress
+  if [[ -n "$disk_pid" ]]; then
+    kill "$disk_pid" 2>/dev/null || true
+    wait "$disk_pid" 2>/dev/null || true
+  fi
+  
+  # Kill any remaining stress-ng processes
+  killall stress-ng 2>/dev/null || true
+  
+  # Stop monitoring
+  kill "$monitor_pid" 2>/dev/null || true
+  wait "$monitor_pid" 2>/dev/null || true
+  
+  # Check test status
+  if [[ -n "${HELLFIRE_USER_ABORTED:-}" ]]; then
+    exit 0  # Handled by cleanup trap
+  elif [[ -n "${HELLFIRE_COOLER_SAFETY_FAILED:-}" ]]; then
+    test_status="FAILED"
+    abort_reason="${HELLFIRE_COOLER_SAFETY_REASON:-Cooler Safety Stop triggered}"
+    red "  Test aborted due to safety stop"
+  else
+    green "  Test completed successfully"
   fi
   
   # Stop sensor monitoring
   stop_sensor_monitor "$HELLFIRE_TEST_NAME"
   
-  # Print summary
-  print_test_summary "$HELLFIRE_TEST_NAME" "$DURATION"
-  
-  red "  ⚠ Check temperatures and system stability!"
-}
-
-# Detect GPU vendor (from ghul-sensors-helper.sh)
-detect_gpu_vendor() {
-  if ! command -v lspci >/dev/null 2>&1; then
-    echo "unknown"
-    return
-  fi
-  
-  local lspci_line
-  lspci_line="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' | head -n1 || true)"
-  
-  if [[ -z "$lspci_line" ]]; then
-    echo "unknown"
-    return
-  fi
-  
-  if echo "$lspci_line" | grep -qi 'NVIDIA'; then
-    echo "nvidia"
-  elif echo "$lspci_line" | grep -qi 'AMD\|ATI'; then
-    echo "amd"
-  elif echo "$lspci_line" | grep -qi 'Intel'; then
-    echo "intel"
-  else
-    echo "unknown"
+  # Print summary (only if not aborted by user)
+  if [[ -z "${HELLFIRE_USER_ABORTED:-}" ]]; then
+    print_cooler_summary "$HELLFIRE_TEST_NAME" "$DURATION" "$test_status" "$abort_reason"
   fi
 }
 
 main "$@"
-
