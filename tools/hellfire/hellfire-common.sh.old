@@ -1,0 +1,1601 @@
+#!/usr/bin/env bash
+# GHUL Hellfire - Common functions for extreme stress tests
+# Shared utilities for CPU, GPU, RAM, and combined stress testing
+
+set -euo pipefail
+
+# Force predictable locale (important for parsing)
+export LANG=C
+export LC_ALL=C
+export LC_NUMERIC=C
+
+# Get base directory (GHULbenchmark root)
+# Script is in tools/hellfire/, so we need to go up 2 levels
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+BASE="$(cd "$SCRIPT_DIR/../.." && pwd)"
+HELLFIRE_DIR="$SCRIPT_DIR"
+LOGDIR="${BASE}/logs/hellfire"
+HOST="$(hostname)"
+
+# Create log directory
+mkdir -p "${LOGDIR}"
+
+# Color output helpers
+red()    { printf '\e[31m%s\e[0m\n' "$@"; }
+green()  { printf '\e[32m%s\e[0m\n' "$@"; }
+yellow() { printf '\e[33m%s\e[0m\n' "$@"; }
+blue()   { printf '\e[34m%s\e[0m\n' "$@"; }
+bold()   { printf '\e[1m%s\e[0m\n' "$@"; }
+
+# Print extreme warning banner
+print_hellfire_warning()  {
+  echo
+  printf '\e[41;97;1m%s\e[0m\n' "======================================================================"
+  printf '\e[41;97;1m%s\e[0m\n' "    ⚠️   GHUL HELLFIRE – EXTREME HARDWARE TORTURE MODE ACTIVATED ⚠️     "
+  printf '\e[41;97;1m%s\e[0m\n' "======================================================================"
+  echo
+  echo "This is NOT a benchmark."
+  echo "This is NOT a stress test."
+  echo "This is a *hardware torture procedure* designed to push your"
+  echo "CPU / GPU / RAM / PSU far beyond any real-world workload."
+  echo
+  echo "Heat levels will reach extreme values."
+  echo "Your room will heat up."
+  echo "Your fans will scream."
+  echo "Your PSU will beg for mercy."
+  echo
+  printf '\e[41;97;1m%s\e[0m\n' "Warning: the name says it all."
+  echo
+  echo "If cooling, power delivery, thermal paste, mounting pressure"
+  echo "or airflow are inadequate, permanent hardware damage is possible."
+  echo
+  echo -n "To continue, type "
+  printf '\e[97;41;1m%s\e[0m' "YES"
+  echo " exactly."
+  echo "Anything else aborts."
+  echo
+}
+
+# Print header (simplified, after warning)
+print_hellfire_header()  {
+  local test_name="$1"
+  local padding_len=$((50 - ${#test_name}))
+  local padding=""
+  if [[ $padding_len -gt 0 ]]; then
+    padding="$(printf '%*s' "$padding_len" '')"
+  fi
+  echo
+  red "╔═══════════════════════════════════════════════════════════════╗"
+  red "║                    GHUL HELLFIRE                              ║"
+  red "║             ${test_name}${padding}║"
+  red "╚═══════════════════════════════════════════════════════════════╝"
+  echo
+}
+
+# Print warning
+print_warning()  {
+  yellow "⚠ WARNING: $*"
+}
+
+# Print critical warning
+print_critical()  {
+  red "🚨 CRITICAL: $*"
+}
+
+# Check if command exists
+have()  {
+  command -v "$1" >/dev/null 2>&1
+}
+
+# Get timestamp for log files
+get_timestamp()  {
+  date +"%Y-%m-%d-%H-%M-%S"
+}
+
+# Start sensor monitoring in background
+# Usage: start_sensor_monitor <test_name> <duration_seconds>
+start_sensor_monitor()  {
+  local test_name="$1"
+  local duration="${2:-0}"  # 0 = infinite
+  local ts
+  ts="$(get_timestamp)"
+  local sensor_log="${LOGDIR}/${ts}-${HOST}-${test_name}-sensors.jsonl"
+  
+  # Start sensor helper in background
+  if [[ -f "${BASE}/tools/ghul-sensors-helper.sh" ]]; then
+    # Pass output file as argument to sensors helper
+    "${BASE}/tools/ghul-sensors-helper.sh" "$sensor_log" >/dev/null 2>&1 &
+    SENSOR_PID=$!
+    echo "$SENSOR_PID" > "${LOGDIR}/.sensor_pid_${test_name}"
+    green "  Sensor monitoring started - PID: ${SENSOR_PID}"
+    green "  Log: $sensor_log"
+  else
+    yellow "  Warning: ghul-sensors-helper.sh not found, sensor monitoring disabled"
+  fi
+}
+
+# Stop sensor monitoring
+stop_sensor_monitor()  {
+  local test_name="$1"
+  local pid_file="${LOGDIR}/.sensor_pid_${test_name}"
+  
+  if [[ -f "$pid_file" ]]; then
+    local pid
+    pid="$(cat "$pid_file")"
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      green "  Sensor monitoring stopped - PID: $pid"
+    fi
+    rm -f "$pid_file"
+  fi
+}
+
+# Read current CPU temperature
+read_cpu_temp()  {
+  local cpu_temp="null"
+  
+  # Method 1: Try /sys/class/hwmon for coretemp Package temperature
+  for hwmon in /sys/class/hwmon/hwmon*; do
+    local hwmon_name
+    hwmon_name="$(cat "$hwmon/name" 2>/dev/null || echo "")"
+    
+    if [[ "$hwmon_name" == "coretemp" ]]; then
+      if [[ -r "$hwmon/temp1_input" ]]; then
+        local temp_mdeg
+        temp_mdeg="$(cat "$hwmon/temp1_input" 2>/dev/null || echo 0)"
+        if [[ "$temp_mdeg" != "0" && -n "$temp_mdeg" ]]; then
+          cpu_temp="$(awk -v t="$temp_mdeg" 'BEGIN { printf "%.1f", t/1000 }')"
+          break
+        fi
+      fi
+    fi
+  done
+  
+  # Method 2: Fallback to sensors -j
+  if [[ "$cpu_temp" == "null" ]] && command -v sensors >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    local sensors_json
+    sensors_json="$(sensors -j 2>/dev/null || echo '{}')"
+    cpu_temp="$(printf '%s' "$sensors_json" | jq -r '
+      ."coretemp-isa-0000" // ."coretemp-isa-0001" // empty |
+      ."Package id 0" // ."Package id 1" // ."Tctl" // ."Tdie" // empty |
+      .temp1_input // empty |
+      select(. != null and . > 0 and . < 200)
+    ' 2>/dev/null | head -n1 || echo "")"
+  fi
+  
+  # Method 3: Fallback to sensors text
+  if [[ "$cpu_temp" == "null" || -z "$cpu_temp" ]] && command -v sensors >/dev/null 2>&1; then
+    cpu_temp="$(sensors 2>/dev/null | awk '/Package id 0:/,/^$/ {if(/temp1:/) {gsub(/\+/,"",$2); gsub(/°C/,"",$2); print $2; exit}}' || echo "")"
+  fi
+  
+  if [[ -n "$cpu_temp" && "$cpu_temp" != "null" ]]; then
+    echo "$cpu_temp"
+  else
+    echo "null"
+  fi
+}
+
+# ============================================================================
+# GPU Sensor Reading Functions
+# ============================================================================
+
+# Detect GPU vendor
+detect_gpu_vendor()  {
+  if ! command -v lspci >/dev/null 2>&1; then
+    echo "unknown"
+    return
+  fi
+  
+  local lspci_line
+  lspci_line="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' | head -n1 || true)"
+  
+  if [[ -z "$lspci_line" ]]; then
+    echo "unknown"
+    return
+  fi
+  
+  if echo "$lspci_line" | grep -qi 'NVIDIA'; then
+    echo "nvidia"
+  elif echo "$lspci_line" | grep -qi 'AMD\|ATI'; then
+    echo "amd"
+  elif echo "$lspci_line" | grep -qi 'Intel'; then
+    echo "intel"
+  else
+    echo "unknown"
+  fi
+}
+
+# Read AMD GPU sensors (edge, hotspot, mem, power, fan)
+read_amd_gpu_sensors()  {
+  local sensors_json
+  sensors_json="$(sensors -j 2>/dev/null || echo '{}'"
+  
+  local edge="null"
+  local hotspot="null"
+  local mem="null"
+  local power="null"
+  local fan="null"
+  
+  # Extract edge temperature
+  edge="$(printf '%s' "$sensors_json" | jq -r '
+    paths(scalars as $p |
+    if ((($p | tostring | test("amdgpu")) and ($p[-1] == "edge") and
+       ((getpath($p) | type == "number")) and
+       ((getpath($p) > 0)))) then
+      getpath($p)
+    else
+      empty
+    end
+  ' 2>/dev/null | while read -r val; do
+    if (( $(echo "$val > 200" | bc -l 2>/dev/null || echo 0) )); then
+      echo "$(awk -v v="$val" 'BEGIN {printf "%.1f", v/1000}')"
+    else
+      echo "$val"
+    fi
+  done | head -n1 || echo "")"
+  
+  # Extract hotspot/junction temperature
+  hotspot="$(printf '%s' "$sensors_json" | jq -r '
+    paths(scalars as $p |
+    if ((($p | tostring | test("amdgpu")) and (($p[-1] == "junction" or $p[-1] == "hotspot")) and
+       ((getpath($p) | type == "number")) and
+       ((getpath($p) > 0)))) then
+      getpath($p)
+    else
+      empty
+    end
+  ' 2>/dev/null | while read -r val; do
+    if (( $(echo "$val > 200" | bc -l 2>/dev/null || echo 0) )); then
+      echo "$(awk -v v="$val" 'BEGIN {printf "%.1f", v/1000}')"
+    else
+      echo "$val"
+    fi
+  done | head -n1 || echo "")"
+  
+  # Extract memory temperature
+  mem="$(printf '%s' "$sensors_json" | jq -r '
+    paths(scalars as $p |
+    if ((($p | tostring | test("amdgpu")) and ($p[-1] == "mem") and
+       ((getpath($p) | type == "number")) and
+       ((getpath($p) > 0)))) then
+      getpath($p)
+    else
+      empty
+    end
+  ' 2>/dev/null | while read -r val; do
+    if (( $(echo "$val > 200" | bc -l 2>/dev/null || echo 0) )); then
+      echo "$(awk -v v="$val" 'BEGIN {printf "%.1f", v/1000}')"
+    else
+      echo "$val"
+    fi
+  done | head -n1 || echo "")"
+  
+  # Extract power (PPT or power1_average)
+  power="$(printf '%s' "$sensors_json" | jq -r '
+    paths(scalars as $p |
+    if ((($p | tostring | test("amdgpu")) and (($p[-1] == "PPT" or $p[-1] == "power1_average")) and
+       ((getpath($p) | type == "number")) and
+       ((getpath($p) > 0)))) then
+      getpath($p)
+    else
+      empty
+    end
+  ' 2>/dev/null | head -n1 || echo "")"
+  
+  # Extract GPU fan (usually fan1 under amdgpu)
+  fan="$(printf '%s' "$sensors_json" | jq -r '
+    paths(scalars as $p |
+    if ((($p | tostring | test("amdgpu")) and (($p[-1] | test("fan[0-9]+_input"))) and
+       ((getpath($p) | type == "number")) and
+       ((getpath($p) > 0)))) then
+      getpath($p)
+    else
+      empty
+    end
+  ' 2>/dev/null | head -n1 || echo "")"
+  
+  # Fallback: try old sensors text parsing for AMD
+  if [[ "$edge" == "null" || -z "$edge" ]]; then
+    edge="$(sensors 2>/dev/null | awk '/edge:/ {gsub(/\+/,"",$2); gsub(/°C/,"",$2); print $2; exit}' || echo "")"
+  fi
+  if [[ "$hotspot" == "null" || -z "$hotspot" ]]; then
+    hotspot="$(sensors 2>/dev/null | awk '/junction:/ {gsub(/\+/,"",$2); gsub(/°C/,"",$2); print $2; exit}' || echo "")"
+  fi
+  if [[ "$mem" == "null" || -z "$mem" ]]; then
+    mem="$(sensors 2>/dev/null | awk '/mem:/ {gsub(/\+/,"",$2); gsub(/°C/,"",$2); print $2; exit}' || echo "")"
+  fi
+  if [[ "$power" == "null" || -z "$power" ]]; then
+    power="$(sensors 2>/dev/null | awk '/PPT:/ {gsub(/W/,"",$2); print $2+0; exit}' || echo "")"
+  fi
+  if [[ "$fan" == "null" || -z "$fan" ]]; then
+    fan="$(sensors 2>/dev/null | awk '/fan1:/ {gsub(/RPM/,"",$2); print $2+0; exit}' || echo "")"
+  fi
+  
+  # Convert empty strings to null
+  [[ -z "$edge" || "$edge" == "" ]] && edge="null"
+  [[ -z "$hotspot" || "$hotspot" == "" ]] && hotspot="null"
+  [[ -z "$mem" || "$mem" == "" ]] && mem="null"
+  [[ -z "$power" || "$power" == "" ]] && power="null"
+  [[ -z "$fan" || "$fan" == "" ]] && fan="null"
+  
+  echo "$edge|$hotspot|$mem|$power|$fan"
+}
+
+# Read NVIDIA GPU sensors (temp, fan, power)
+read_nvidia_gpu_sensors()  {
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "null|null|null"
+    return
+  fi
+  
+  local temp="null"
+  local fan="null"
+  local power="null"
+  
+  # nvidia-smi --query-gpu=temperature.gpu,fan.speed,power.draw --format=csv,noheader,nounits
+  local nvidia_output
+  nvidia_output="$(nvidia-smi --query-gpu=temperature.gpu,fan.speed,power.draw --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "")"
+  
+  if [[ -n "$nvidia_output" ]]; then
+    temp="$(echo "$nvidia_output" | cut -d',' -f1 | xargs || echo "")"
+    fan="$(echo "$nvidia_output" | cut -d',' -f2 | xargs || echo "")"
+    power="$(echo "$nvidia_output" | cut -d',' -f3 | xargs || echo "")"
+    
+    # Sanitize: remove % from fan speed
+    if [[ -n "$fan" && "$fan" != "null" ]]; then
+      fan="$(echo "$fan" | sed 's/%//' | xargs || echo "")"
+    fi
+    
+    # Convert empty strings to null
+    [[ -z "$temp" || "$temp" == "" ]] && temp="null"
+    [[ -z "$fan" || "$fan" == "" ]] && fan="null"
+    [[ -z "$power" || "$power" == "" ]] && power="null"
+  fi
+  
+  echo "$temp|$fan|$power"
+}
+
+# Get GPU power limit (for safety check)
+get_gpu_power_limit()  {
+  local gpu_vendor="$1"
+  local power_limit="null"
+  
+  if [[ "$gpu_vendor" == "nvidia" ]]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      power_limit="$(nvidia-smi --query-gpu=power.limit --format=csv,noheader,nounits 2>/dev/null | head -n1 | xargs || echo "")"
+      # Remove "W" suffix if present
+      power_limit="$(echo "$power_limit" | sed 's/W//' | xargs || echo "")"
+    fi
+  elif [[ "$gpu_vendor" == "amd" ]]; then
+    # Try to read from sensors -j (PPT)
+    local sensors_json
+    sensors_json="$(sensors -j 2>/dev/null || echo '{}')"
+    power_limit="$(printf '%s' "$sensors_json" | jq -r '
+      paths(scalars as $p |
+      if ((($p | tostring | test("amdgpu")) and ($p[-1] == "PPT") and
+         ((getpath($p) | type == "number")) and
+         ((getpath($p) > 0)))) then
+        getpath($p)
+      else
+        empty
+      end
+    ' 2>/dev/null | head -n1 || echo """
+  fi
+  
+  [[ -z "$power_limit" || "$power_limit" == "" ]] && power_limit="null"
+  echo "$power_limit"
+}
+
+# Read current GPU sensors (unified interface)
+read_gpu_sensors()  {
+  local gpu_vendor="$1"
+  local edge="null"
+  local hotspot="null"
+  local vram="null"
+  local power="null"
+  local fan="null"
+  
+  if [[ "$gpu_vendor" == "amd" ]]; then
+    local amd_sensors
+    amd_sensors="$(read_amd_gpu_sensors)"
+    IFS='|' read -r edge hotspot vram power fan <<< "$amd_sensors"
+  elif [[ "$gpu_vendor" == "nvidia" ]]; then
+    local nvidia_sensors
+    nvidia_sensors="$(read_nvidia_gpu_sensors)"
+    IFS='|' read -r temp fan power <<< "$nvidia_sensors"
+    # NVIDIA: temp is edge, no hotspot/vram in nvidia-smi
+    edge="$temp"
+    hotspot="null"
+    vram="null"
+  else
+    # Intel or unknown: all null
+    edge="null"
+    hotspot="null"
+    vram="null"
+    power="null"
+    fan="null"
+  fi
+  
+  # Convert to numeric or null
+  [[ "$edge" == "null" || -z "$edge" ]] && edge="null" || edge="$(echo "$edge" | awk '{printf "%.1f", $1}')"
+  [[ "$hotspot" == "null" || -z "$hotspot" ]] && hotspot="null" || hotspot="$(echo "$hotspot" | awk '{printf "%.1f", $1}')"
+  [[ "$vram" == "null" || -z "$vram" ]] && vram="null" || vram="$(echo "$vram" | awk '{printf "%.1f", $1}')"
+  [[ "$power" == "null" || -z "$power" ]] && power="null" || power="$(echo "$power" | awk '{printf "%.1f", $1}')"
+  [[ "$fan" == "null" || -z "$fan" ]] && fan="null" || fan="$(echo "$fan" | awk '{printf "%.1f", $1}')"
+  
+  echo "$edge|$hotspot|$vram|$power|$fan"
+}
+
+# Monitor CPU temperature during test and abort if > 100°C for > 5 seconds
+# Usage: monitor_cpu_temp <test_name> <duration_seconds> <stress_pid>
+# Sets HELLFIRE_TEMP_FAILED=1 if critical temperature exceeded
+monitor_cpu_temp()  {
+  local test_name="$1"
+  local duration="$2"
+  local stress_pid="$3"
+  local critical_temp=100.0
+  local critical_duration=5  # seconds
+  local over_temp_start=0
+  local last_temp="null"
+  
+  green "  Temperature monitoring active critical: ${critical_temp}°C for ${critical_duration}s"
+  
+  local start_time
+  start_time="$(date +%s)"
+  local end_time
+  end_time=$((start_time + duration))
+  
+  while [[ $(date +%s) -lt $end_time ]]; do
+    # Check if stress test is still running
+    if ! kill -0 "$stress_pid" 2>/dev/null; then
+      # Stress test finished normally
+      break
+    fi
+    
+    local current_temp
+    current_temp="$(read_cpu_temp)"
+    
+    if [[ "$current_temp" != "null" ]]; then
+      # Check if temperature is critical
+      if (( $(echo "$current_temp >= $critical_temp" | bc -l 2>/dev/null || echo 0) )); then
+        if [[ $over_temp_start -eq 0 ]]; then
+          # First time over critical temp
+          over_temp_start="$(date +%s)"
+          red "  🚨 WARNING: CPU temperature critical: ${current_temp}°C"
+        else
+          # Still over critical temp - check duration
+          local over_temp_duration
+          over_temp_duration=$(($(date +%s) - over_temp_start))
+          if [[ $over_temp_duration -ge $critical_duration ]]; then
+            red "
+            red "╔═══════════════════════════════════════════════════════════════╗"
+            red "║                    TEST FAILED                               ║"
+            red "╚═══════════════════════════════════════════════════════════════╝"
+            red "
+            red "  🚨 CRITICAL: CPU temperature exceeded ${critical_temp}°C for ${critical_duration} seconds"
+            red "  Current temperature: ${current_temp}°C"
+            red "  Test aborted to prevent hardware damage."
+            red ""
+            red "  FAIL"
+            red ""
+            # Signal failure by setting flag and killing stress test
+            export HELLFIRE_TEMP_FAILED=1
+            kill "$stress_pid" 2>/dev/null || true
+            return 1
+          fi
+        fi
+      else
+        # Temperature dropped below critical
+        if [[ $over_temp_start -gt 0 ]]; then
+          yellow "  CPU temperature normalized: ${current_temp}°C"
+          over_temp_start=0
+        fi
+      fi
+      
+      last_temp="$current_temp"
+    fi
+    
+    # Update every second
+    sleep 1
+  done
+  
+  return 0
+}
+
+# Check temperatures before starting (safety check)
+# Monitor GPU sensors during test with safety stops
+# Usage: monitor_gpu_safety <test_name> <duration_seconds> <stress_pid> <gpu_vendor>
+# Sets HELLFIRE_GPU_SAFETY_FAILED=1 and HELLFIRE_GPU_SAFETY_REASON if safety stop triggered
+monitor_gpu_safety()  {
+  local test_name="$1"
+  local duration="$2"
+  local stress_pid="$3"
+  local gpu_vendor="$4"
+  
+  # Safety thresholds
+  local vram_critical=90.0      # Immediate stop
+  local fan_critical=20.0        # Fan critical (percentage - only if GPU is warm)
+  local fan_temp_edge_threshold=65.0  # Edge temp threshold for fan check
+  local fan_temp_hotspot_threshold=70.0  # Hotspot temp threshold for fan check
+  local fan_delay=5              # Delay in seconds before fan stop (to avoid false alarms)
+  local power_limit_mult=1.10    # 110% of power limit (immediate stop)
+  local hotspot_critical=100.0   # Delayed stop (2 seconds)
+  local hotspot_warning=95.0     # Warning only
+  local vram_warning=85.0        # Warning only
+  
+  # Get power limit
+  local power_limit
+  power_limit="$(get_gpu_power_limit "$gpu_vendor")"
+  
+  green "  GPU safety monitoring active"
+  if [[ "$power_limit" != "null" && -n "$power_limit" ]]; then
+    green "     Power limit: ${power_limit}W - stop at $(echo "$power_limit $power_limit_mult" | awk '{printf "%.1f", $1 * $2}')W"
+  fi
+  green "     Immediate stops: VRAM > ${vram_critical}°C, Power > 110% limit"
+    green "     Fan safety: Fan < ${fan_critical}% only if GPU Edge ≥ ${fan_temp_edge_threshold}°C OR Hotspot ≥ ${fan_temp_hotspot_threshold}°C - ${fan_delay}s delay"
+  green "     Delayed stop: Hotspot > ${hotspot_critical}°C for 2s"
+  green "     Warnings: Hotspot > ${hotspot_warning}°C, VRAM > ${vram_warning}°C"
+  green "     Note: 0-RPM idle mode is allowed when GPU is cold Edge < ${fan_temp_edge_threshold}°C, Hotspot < ${fan_temp_hotspot_threshold}°C"
+  echo
+  
+  local start_time
+  start_time="$(date +%s)"
+  local end_time
+  end_time=$((start_time + duration
+  
+  local hotspot_over_start=0
+  local fan_fail_start=0
+  local last_warning_time=0
+  
+  while [[ $(date +%s) -lt $end_time ]]; do
+    # Check if stress test is still running
+    if ! kill -0 "$stress_pid" 2>/dev/null; then
+      break
+    fi
+    
+    # Read current GPU sensors
+    local gpu_sensors
+    gpu_sensors="$(read_gpu_sensors "$gpu_vendor")"
+    IFS='|' read -r edge hotspot vram power fan <<< "$gpu_sensors"
+    
+    local current_time
+    current_time="$(date +%s"
+    
+    # Immediate stops (no delay)
+    if [[ "$vram" != "null" && -n "$vram" ]] && (( $(echo "$vram > $vram_critical" | bc -l 2>/dev/null || echo 0) )); then
+      export HELLFIRE_GPU_SAFETY_FAILED=1
+      export HELLFIRE_GPU_SAFETY_REASON="VRAM temperature exceeded ${vram_critical}°C - current: ${vram}°C"
+      red "  🚨 IMMEDIATE STOP: VRAM temperature ${vram}°C > ${vram_critical}°C"
+      kill "$stress_pid" 2>/dev/null || true
+      return
+    fi
+    
+    # Fan check: only fail if GPU is warm AND fan is low
+    # Allow 0-RPM when GPU is cold Edge < 65°C AND Hotspot < 70°C
+    if [[ "$fan" != "null" && -n "$fan" ]] && (( $(echo "$fan < $fan_critical" | bc -l 2>/dev/null || echo 0) )); then
+      # Check if GPU is warm enough that fan should be running
+      local gpu_is_warm=0
+      if [[ "$edge" != "null" && -n "$edge" ]] && (( $(echo "$edge >= $fan_temp_edge_threshold" | bc -l 2>/dev/null || echo 0) )); then
+        gpu_is_warm=1
+      fi
+      if [[ "$hotspot" != "null" && -n "$hotspot" ]] && (( $(echo "$hotspot >= $fan_temp_hotspot_threshold" | bc -l 2>/dev/null || echo 0) )); then
+        gpu_is_warm=1
+      fi
+      
+      if [[ $gpu_is_warm -eq 1 ]]; then
+        # GPU is warm, fan should be running - start timer
+        if [[ $fan_fail_start -eq 0 ]]; then
+          fan_fail_start=$current_time
+        fi
+        
+        local fan_fail_duration
+        fan_fail_duration=$((current_time - fan_fail_start
+        if [[ $fan_fail_duration -ge $fan_delay ]]; then
+          export HELLFIRE_GPU_SAFETY_FAILED=1
+          export HELLFIRE_GPU_SAFETY_REASON="GPU fan speed ${fan}% < ${fan_critical}% while GPU was above safe temperature - Edge: ${edge}°C, Hotspot: ${hotspot}°C"
+          red "  🚨 DELAYED STOP: GPU fan speed ${fan}% < ${fan_critical}% for ${fan_fail_duration}s while GPU was warm"
+          kill "$stress_pid" 2>/dev/null || true
+          return
+        fi
+      else
+        # GPU is cold, 0-RPM is OK - reset timer
+        fan_fail_start=0
+      fi
+    else
+      # Fan is OK - reset timer
+      fan_fail_start=0
+    fi
+    
+    if [[ "$power" != "null" && -n "$power" && "$power_limit" != "null" && -n "$power_limit" ]]; then
+      local power_limit_max
+      power_limit_max="$(echo "$power_limit $power_limit_mult" | awk '{printf "%.1f", $1 * $2}')"
+      if (( $(echo "$power > $power_limit_max" | bc -l 2>/dev/null || echo 0) )); then
+        export HELLFIRE_GPU_SAFETY_FAILED=1
+        export HELLFIRE_GPU_SAFETY_REASON="GPU power draw exceeded 110% of limit - ${power}W > ${power_limit_max}W"
+        red "  🚨 IMMEDIATE STOP: GPU power ${power}W > 110% of limit - ${power_limit_max}W"
+        kill "$stress_pid" 2>/dev/null || true
+        return
+      fi
+    fi
+    
+    # Delayed stop: Hotspot > 100°C for 2 seconds
+    if [[ "$hotspot" != "null" && -n "$hotspot" ]]; then
+      if (( $(echo "$hotspot > $hotspot_critical" | bc -l 2>/dev/null || echo 0) )); then
+        if [[ $hotspot_over_start -eq 0 ]]; then
+          hotspot_over_start=$current_time
+        fi
+        
+        local hotspot_duration
+        hotspot_duration=$((current_time - hotspot_over_start
+        if [[ $hotspot_duration -ge 2 ]]; then
+          export HELLFIRE_GPU_SAFETY_FAILED=1
+          export HELLFIRE_GPU_SAFETY_REASON="Hotspot temperature exceeded ${hotspot_critical}°C for ${hotspot_duration}s - current: ${hotspot}°C"
+          red "  🚨 DELAYED STOP: Hotspot ${hotspot}°C > ${hotspot_critical}°C for ${hotspot_duration}s"
+          kill "$stress_pid" 2>/dev/null || true
+          return
+        fi
+      else
+        hotspot_over_start=0
+      fi
+    fi
+    
+    # Warnings (no stop, just output)
+    if [[ $((current_time - last_warning_time)) -ge 5 ]]; then  # Throttle warnings to every 5 seconds
+      if [[ "$hotspot" != "null" && -n "$hotspot" ]] && (( $(echo "$hotspot > $hotspot_warning" | bc -l 2>/dev/null || echo 0) )); then
+        yellow "  ⚠️  WARNING: Hotspot temperature ${hotspot}°C > ${hotspot_warning}°C"
+        last_warning_time=$current_time
+      fi
+      
+      if [[ "$vram" != "null" && -n "$vram" ]] && (( $(echo "$vram > $vram_warning" | bc -l 2>/dev/null || echo 0) )); then
+        yellow "  ⚠️  WARNING: VRAM temperature ${vram}°C > ${vram_warning}°C"
+        last_warning_time=$current_time
+      fi
+    fi
+    
+    sleep 1
+  done
+}
+
+check_temps_before_start()  {
+  local cpu_temp
+  cpu_temp="$(read_cpu_temp)"
+  
+  if [[ "$cpu_temp" != "null" ]]; then
+    if (( $(echo "$cpu_temp > 80" | bc -l 2>/dev/null || echo 0) )); then
+      yellow "  CPU temperature is already high: ${cpu_temp}°C"
+    fi
+  fi
+}
+
+# Cleanup function (trap - only runs once)
+cleanup_hellfire()  {
+  # Prevent multiple cleanup runs
+  if [[ -n "${HELLFIRE_CLEANUP_DONE:-}" ]]; then
+    return 0
+  fi
+  export HELLFIRE_CLEANUP_DONE=1
+  
+  local test_name="${HELLFIRE_TEST_NAME:-unknown}"
+  local signal="${1:-EXIT}"
+  
+  # Check if this was a manual abort (SIGINT/SIGTERM)
+  if [[ "$signal" == "INT" || "$signal" == "TERM" ]]; then
+    # Calculate elapsed time
+    local elapsed=0
+    if [[ -n "${HELLFIRE_START_TIME:-}" ]]; then
+      local current_time
+      current_time="$(date +%s)"
+      elapsed=$((current_time - HELLFIRE_START_TIME))
+    fi
+    
+    # Set abort status
+    export HELLFIRE_USER_ABORTED=1
+    export HELLFIRE_ABORT_TIME=$elapsed
+    
+    yellow "  Cleaning up..."
+    stop_sensor_monitor "$test_name"
+    # Kill any remaining stress processes
+    pkill -f "stress-ng" 2>/dev/null || true
+    pkill -f "gputest" 2>/dev/null || true
+    pkill -f "furmark" 2>/dev/null || true
+    pkill -f "prime95" 2>/dev/null || true
+    # Wait a bit for processes to terminate
+    sleep 1
+    green "  Cleanup complete"
+    
+    # Print summary if test was running
+    if [[ -n "${HELLFIRE_TEST_NAME:-}" && -n "${HELLFIRE_DURATION:-}" ]]; then
+      echo
+      print_test_summary "${HELLFIRE_TEST_NAME}" "${HELLFIRE_ABORT_TIME}" "FAILED" "user abortion after ${elapsed} seconds"
+    fi
+  else
+    # Normal cleanup (EXIT)
+    yellow "  Cleaning up..."
+    stop_sensor_monitor "$test_name"
+    # Kill any remaining stress processes
+    pkill -f "stress-ng" 2>/dev/null || true
+    pkill -f "gputest" 2>/dev/null || true
+    pkill -f "furmark" 2>/dev/null || true
+    pkill -f "prime95" 2>/dev/null || true
+    # Wait a bit for processes to terminate
+    sleep 1
+    green "  Cleanup complete"
+  fi
+}
+
+# Setup trap for cleanup
+setup_cleanup_trap()  {
+  # Store start time
+  export HELLFIRE_START_TIME="$(date +%s)"
+  # Setup traps for different signals
+  trap 'cleanup_hellfire INT' INT
+  trap 'cleanup_hellfire TERM' TERM
+  trap 'cleanup_hellfire EXIT' EXIT
+}
+
+# Countdown before starting
+countdown()  {
+  local seconds="${1:-5}"
+  yellow "  Starting in $seconds seconds..."
+  for ((i=seconds; i>0; i--)); do
+    printf "\r  %d... " "$i"
+    sleep 1
+  done
+  printf "\r  Starting now!    \n"
+}
+
+# Parse sensor log and calculate min/avg/max temperatures
+parse_sensor_log()  {
+  local log_file="$1"
+  
+  if [[ ! -f "$log_file" ]] || [[ ! -s "$log_file" ]]; then
+    return 1
+  fi
+  
+  if ! command -v jq >/dev/null 2>&1; then
+    return 1
+  fi
+  
+  # Extract temperatures from JSONL file
+  local cpu_temps
+  cpu_temps="$(jq -r '.cpu_temp_c // empty' "$log_file" 2>/dev/null | grep -v '^null$' | grep -v '^$' || true"
+  local gpu_temps
+  gpu_temps="$(jq -r '.gpu_temp_c // empty' "$log_file" 2>/dev/null | grep -v '^null$' | grep -v '^$' || true"
+  local gpu_hotspot
+  gpu_hotspot="$(jq -r '.gpu_hotspot_c // empty' "$log_file" 2>/dev/null | grep -v '^null$' | grep -v '^$' || true"
+  local gpu_vram
+  gpu_vram="$(jq -r '.gpu_memtemp_c // empty' "$log_file" 2>/dev/null | grep -v '^null$' | grep -v '^$' || true"
+  local gpu_power
+  gpu_power="$(jq -r '.gpu_power_w // empty' "$log_file" 2>/dev/null | grep -v '^null$' | grep -v '^$' || true"
+  local gpu_fan
+  gpu_fan="$(jq -r '.gpu_fan_rpm // empty' "$log_file" 2>/dev/null | grep -v '^null$' | grep -v '^$' || true)"
+  
+  # Calculate statistics for CPU
+  if [[ -n "$cpu_temps" ]]; then
+    local cpu_min cpu_avg cpu_max cpu_count
+    cpu_min="$(echo "$cpu_temps" | awk 'BEGIN {min=999} {if($1<min) min=$1} END {print min}')"
+    cpu_max="$(echo "$cpu_temps" | awk 'BEGIN {max=0} {if($1>max) max=$1} END {print max}')"
+    cpu_avg="$(echo "$cpu_temps" | awk '{sum+=$1; count++} END {if(count>0) printf "%.1f", sum/count; else print "0"}')"
+    cpu_count="$(echo "$cpu_temps" | wc -l)"
+    
+    echo "CPU_TEMP_MIN=$cpu_min"
+    echo "CPU_TEMP_AVG=$cpu_avg"
+    echo "CPU_TEMP_MAX=$cpu_max"
+    echo "CPU_TEMP_COUNT=$cpu_count"
+  fi
+  
+  # Calculate statistics for GPU edge
+  if [[ -n "$gpu_temps" ]]; then
+    local gpu_min gpu_avg gpu_max gpu_count
+    gpu_min="$(echo "$gpu_temps" | awk 'BEGIN {min=999} {if($1<min) min=$1} END {print min}')"
+    gpu_max="$(echo "$gpu_temps" | awk 'BEGIN {max=0} {if($1>max) max=$1} END {print max}')"
+    gpu_avg="$(echo "$gpu_temps" | awk '{sum+=$1; count++} END {if(count>0) printf "%.1f", sum/count; else print "0"}')"
+    gpu_count="$(echo "$gpu_temps" | wc -l)"
+    
+    echo "GPU_TEMP_MIN=$gpu_min"
+    echo "GPU_TEMP_AVG=$gpu_avg"
+    echo "GPU_TEMP_MAX=$gpu_max"
+    echo "GPU_TEMP_COUNT=$gpu_count"
+  fi
+  
+  # Calculate statistics for GPU hotspot
+  if [[ -n "$gpu_hotspot" ]]; then
+    local hotspot_min hotspot_avg hotspot_max hotspot_count
+    hotspot_min="$(echo "$gpu_hotspot" | awk 'BEGIN {min=999} {if($1<min) min=$1} END {print min}')"
+    hotspot_max="$(echo "$gpu_hotspot" | awk 'BEGIN {max=0} {if($1>max) max=$1} END {print max}')"
+    hotspot_avg="$(echo "$gpu_hotspot" | awk '{sum+=$1; count++} END {if(count>0) printf "%.1f", sum/count; else print "0"}')"
+    hotspot_count="$(echo "$gpu_hotspot" | wc -l)"
+    
+    echo "GPU_HOTSPOT_MIN=$hotspot_min"
+    echo "GPU_HOTSPOT_AVG=$hotspot_avg"
+    echo "GPU_HOTSPOT_MAX=$hotspot_max"
+    echo "GPU_HOTSPOT_COUNT=$hotspot_count"
+  fi
+  
+  # Calculate statistics for GPU VRAM
+  if [[ -n "$gpu_vram" ]]; then
+    local vram_min vram_avg vram_max vram_count
+    vram_min="$(echo "$gpu_vram" | awk 'BEGIN {min=999} {if($1<min) min=$1} END {print min}')"
+    vram_max="$(echo "$gpu_vram" | awk 'BEGIN {max=0} {if($1>max) max=$1} END {print max}')"
+    vram_avg="$(echo "$gpu_vram" | awk '{sum+=$1; count++} END {if(count>0) printf "%.1f", sum/count; else print "0"}')"
+    vram_count="$(echo "$gpu_vram" | wc -l)"
+    
+    echo "GPU_VRAM_MIN=$vram_min"
+    echo "GPU_VRAM_AVG=$vram_avg"
+    echo "GPU_VRAM_MAX=$vram_max"
+    echo "GPU_VRAM_COUNT=$vram_count"
+  fi
+  
+  # Calculate statistics for GPU power
+  if [[ -n "$gpu_power" ]]; then
+    local power_min power_avg power_max power_count
+    power_min="$(echo "$gpu_power" | awk 'BEGIN {min=999} {if($1<min) min=$1} END {print min}')"
+    power_max="$(echo "$gpu_power" | awk 'BEGIN {max=0} {if($1>max) max=$1} END {print max}')"
+    power_avg="$(echo "$gpu_power" | awk '{sum+=$1; count++} END {if(count>0) printf "%.1f", sum/count; else print "0"}')"
+    power_count="$(echo "$gpu_power" | wc -l)"
+    
+    echo "GPU_POWER_MIN=$power_min"
+    echo "GPU_POWER_AVG=$power_avg"
+    echo "GPU_POWER_MAX=$power_max"
+    echo "GPU_POWER_COUNT=$power_count"
+  fi
+  
+  # Calculate statistics for GPU fan
+  if [[ -n "$gpu_fan" ]]; then
+    local fan_min fan_avg fan_max fan_count
+    fan_min="$(echo "$gpu_fan" | awk 'BEGIN {min=999} {if($1<min) min=$1} END {print min}')"
+    fan_max="$(echo "$gpu_fan" | awk 'BEGIN {max=0} {if($1>max) max=$1} END {print max}')"
+    fan_avg="$(echo "$gpu_fan" | awk '{sum+=$1; count++} END {if(count>0) printf "%.1f", sum/count; else print "0"}')"
+    fan_count="$(echo "$gpu_fan" | wc -l)"
+    
+    echo "GPU_FAN_MIN=$fan_min"
+    echo "GPU_FAN_AVG=$fan_avg"
+    echo "GPU_FAN_MAX=$fan_max"
+    echo "GPU_FAN_COUNT=$fan_count"
+  fi
+}
+
+# Get thermal status based on max CPU temperature
+# For RAM tests, uses RAM-specific thresholds
+get_thermal_status()  {
+  local max_temp="$1"
+  local limit="$2"
+  local was_aborted="${3:-0}"  # 1 if test was aborted due to temperature
+  local component="${4:-CPU}"  # CPU, GPU, or RAM
+  
+  if [[ -z "$max_temp" || "$max_temp" == "null" ]]; then
+    echo "UNKNOWN"
+    return
+  fi
+  
+  # If test was aborted due to temperature, it's CRITICAL
+  if [[ "$was_aborted" == "1" ]]; then
+    echo "CRITICAL"
+    return
+  fi
+  
+  # RAM-specific thresholds
+  if [[ "$component" == "RAM" ]]; then
+    if (( $(echo "$max_temp < 65" | bc -l 2>/dev/null || echo 0) )); then
+      echo "EXCELLENT"
+    elif (( $(echo "$max_temp < 75" | bc -l 2>/dev/null || echo 0) )); then
+      echo "OK"
+    elif (( $(echo "$max_temp < 85" | bc -l 2>/dev/null || echo 0) )); then
+      echo "WARM"
+    elif (( $(echo "$max_temp >= 85" | bc -l 2>/dev/null || echo 0) )); then
+      echo "CRITICAL"
+    else
+      echo "UNKNOWN"
+    fi
+  else
+    # CPU/GPU thresholds
+    if (( $(echo "$max_temp < 70" | bc -l 2>/dev/null || echo 0) )); then
+      echo "EXCELLENT"
+    elif (( $(echo "$max_temp < 85" | bc -l 2>/dev/null || echo 0) )); then
+      echo "OK"
+    elif (( $(echo "$max_temp < 95" | bc -l 2>/dev/null || echo 0) )); then
+      echo "WARM"
+    elif (( $(echo "$max_temp >= 95" | bc -l 2>/dev/null || echo 0) )); then
+      echo "CRITICAL"
+    else
+      echo "UNKNOWN"
+    fi
+  fi
+}
+
+# Print overall thermal status message
+print_thermal_status()  {
+  local status="$1"
+  local max_temp="$2"
+  local limit="$3"
+  local test_status="${4:-PASS}"  # PASS, ABORTED, or FAILED
+  
+  # Special case: user abort = INSUFFICIENT
+  if [[ "$test_status" == "FAILED" ]]; then
+    red "  Overall Thermal Status: ❌ COOLING INSUFFICIENT - or user abort"
+    return
+  fi
+  
+  case "$status" in
+    EXCELLENT)
+      green "  Overall Thermal Status: ✅ COOLING EXCELLENT"
+      ;;
+    OK)
+      green "  Overall Thermal Status: ✅ COOLING OK"
+      ;;
+    WARM)
+      yellow "  Overall Thermal Status: ⚠️ COOLING WARM"
+      ;;
+    CRITICAL)
+      red "  Overall Thermal Status: 🚨 COOLING CRITICAL"
+      ;;
+    *
+      yellow "  Overall Thermal Status: ? UNKNOWN – temperature data not available."
+      ;;
+  esac
+}
+
+# Print RAM thermal status message
+print_ram_thermal_status()  {
+  local status="$1"
+  local max_temp="$2"
+  local limit="$3"
+  
+  case "$status" in
+    EXCELLENT)
+      green "  RAM Thermal Status:      🟩 EXCELLENT"
+      ;;
+    OK)
+      green "  RAM Thermal Status:      🟩 OK"
+      ;;
+    WARM)
+      yellow "  RAM Thermal Status:      🟨 WARM"
+      ;;
+    CRITICAL)
+      red "  RAM Thermal Status:      🟥 CRITICAL"
+      ;;
+    *
+      yellow "  RAM Thermal Status:      ? UNKNOWN"
+      ;;
+  esac
+}
+
+# Print GPU thermal status message
+print_gpu_thermal_status()  {
+  local status="$1"
+  local max_hotspot="$2"
+  local max_vram="$3"
+  
+  case "$status" in
+    EXCELLENT)
+      green "  GPU Thermal Status:      ✅ EXCELLENT"
+      ;;
+    OK)
+      green "  GPU Thermal Status:      ✅ OK"
+      ;;
+    WARM)
+      yellow "  GPU Thermal Status:      ⚠️ WARM"
+      ;;
+    CRITICAL)
+      red "  GPU Thermal Status:      🚨 CRITICAL"
+      ;;
+    *
+      yellow "  GPU Thermal Status:      ? UNKNOWN"
+      ;;
+  esac
+}
+
+# Print GHUL Hellfire GPU Rating
+print_gpu_ghul_rating()  {
+  local rating="$1"
+  local max_hotspot="$2"
+  local max_vram="$3"
+  local test_status="${4:-PASS}"
+  
+  case "$rating" in
+    EXCELLENT)
+      green "  EXCELLENT"
+      if [[ -n "$max_hotspot" && "$max_hotspot" != "null" ]]; then
+        echo '  Hotspot Band: < 80°C - your max hotspot: '"${max_hotspot}"'°C'
+      else
+        echo "  Hotspot Band: < 80°C"
+      fi
+      if [[ -n "$max_vram" && "$max_vram" != "null" ]]; then
+        echo "  VRAM Status: ${max_vram}°C"
+      else
+        echo "  VRAM Status: N/A"
+      fi
+      echo "  This is an illegal level of cooling performance. Your cooler laughs at Hellfire. Your RIG is born to overclock."
+      ;;
+    OK)
+      green "  OK"
+      if [[ -n "$max_hotspot" && "$max_hotspot" != "null" ]]; then
+        echo '  Hotspot Band: 80–90°C - your max hotspot: '"${max_hotspot}"'°C'
+      else
+        echo "  Hotspot Band: 80–90°C"
+      fi
+      if [[ -n "$max_vram" && "$max_vram" != "null" ]]; then
+        echo "  VRAM Status: ${max_vram}°C"
+      else
+        echo "  VRAM Status: N/A"
+      fi
+      echo "  This cooler can handle raids, boss fights and your bad decisions relaxed."
+      ;;
+    WARM)
+      yellow "  WARM"
+      if [[ -n "$max_hotspot" && "$max_hotspot" != "null" ]]; then
+        echo '  Hotspot Band: 90–95°C - your max hotspot: '"${max_hotspot}"'°C'
+      else
+        echo "  Hotspot Band: 90–95°C"
+      fi
+      if [[ -n "$max_vram" && "$max_vram" != "null" ]]; then
+        echo "  VRAM Status: ${max_vram}°C"
+      else
+        echo "  VRAM Status: N/A"
+      fi
+      echo "  Your GPU is preheating the room. Might be time for a cleaning?"
+      ;;
+    CRITICAL)
+      red "  CRITICAL"
+      if [[ -n "$max_hotspot" && "$max_hotspot" != "null" ]]; then
+        echo '  Hotspot Band: ≥ 95°C - your max hotspot: '"${max_hotspot}"'°C'
+      else
+        echo "  Hotspot Band: ≥ 95°C"
+      fi
+      if [[ -n "$max_vram" && "$max_vram" != "null" ]]; then
+        echo "  VRAM Status: ${max_vram}°C"
+      else
+        echo "  VRAM Status: N/A"
+      fi
+      echo "  Your GPU is forging a new planet core. Stop the run... NOW!"
+      ;;
+    ABORTED)
+      yellow "  ABORTED"
+      echo "  Hellfire run aborted: no guts today — no RMA tomorrow."
+      echo "  Your GPU thanks you."
+      ;;
+    *
+      yellow "  UNKNOWN"
+      echo "  Temperature data not available."
+      ;;
+  esac
+  echo
+}
+
+# Get GPU thermal status (based on Hotspot + VRAM)
+get_gpu_thermal_status()  {
+  local max_hotspot="$1"
+  local max_vram="$2"
+  local was_aborted="${3:-0}"
+  
+  if [[ "$was_aborted" == "1" ]]; then
+    echo "INSUFFICIENT"
+    return
+  fi
+  
+  if [[ -z "$max_hotspot" || "$max_hotspot" == "null" ]]; then
+    echo "UNKNOWN"
+    return
+  fi
+  
+  # EXCELLENT: Hotspot < 80°C AND VRAM < 70°C
+  if (( $(echo "$max_hotspot < 80" | bc -l 2>/dev/null || echo 0) )); then
+    if [[ -z "$max_vram" || "$max_vram" == "null" ]] || (( $(echo "$max_vram < 70" | bc -l 2>/dev/null || echo 0) )); then
+      echo "EXCELLENT"
+      return
+    fi
+  fi
+  
+  # OK: Hotspot 80–90°C AND VRAM < 85°C
+  if (( $(echo "$max_hotspot >= 80 && $max_hotspot < 90" | bc -l 2>/dev/null || echo 0) )); then
+    if [[ -z "$max_vram" || "$max_vram" == "null" ]] || (( $(echo "$max_vram < 85" | bc -l 2>/dev/null || echo 0) )); then
+      echo "OK"
+      return
+    fi
+  fi
+  
+  # WARM: Hotspot 90–95°C OR VRAM 85–90°C
+  if (( $(echo "$max_hotspot >= 90 && $max_hotspot < 95" | bc -l 2>/dev/null || echo 0) )) || \
+     ([[ -n "$max_vram" && "$max_vram" != "null" ]] && (( $(echo "$max_vram >= 85 && $max_vram < 90" | bc -l 2>/dev/null || echo 0) ))); then
+    echo "WARM"
+    return
+  fi
+  
+  # CRITICAL: Hotspot ≥ 95°C OR VRAM ≥ 90°C
+  if (( $(echo "$max_hotspot >= 95" | bc -l 2>/dev/null || echo 0) )) || \
+     ([[ -n "$max_vram" && "$max_vram" != "null" ]] && (( $(echo "$max_vram >= 90" | bc -l 2>/dev/null || echo 0) ))); then
+    echo "CRITICAL"
+    return
+  fi
+  
+  echo "UNKNOWN"
+}
+
+# Get GHUL Hellfire GPU Rating (based on Hotspot bands)
+get_gpu_ghul_rating()  {
+  local max_hotspot="$1"
+  local was_aborted="${2:-0}"
+  local test_status="${3:-PASS}"
+  
+  # Special case: user abort
+  if [[ "$test_status" == "FAILED" ]]; then
+    echo "ABORTED"
+    return
+  fi
+  
+  if [[ "$was_aborted" == "1" ]]; then
+    echo "CRITICAL"
+    return
+  fi
+  
+  if [[ -z "$max_hotspot" || "$max_hotspot" == "null" ]]; then
+    echo "UNKNOWN"
+    return
+  fi
+  
+  # EXCELLENT: Hotspot < 80°C
+  if (( $(echo "$max_hotspot < 80" | bc -l 2>/dev/null || echo 0) )); then
+    echo "EXCELLENT"
+    return
+  fi
+  
+  # OK: 80–90°C
+  if (( $(echo "$max_hotspot >= 80 && $max_hotspot < 90" | bc -l 2>/dev/null || echo 0) )); then
+    echo "OK"
+    return
+  fi
+  
+  # WARM: 90–95°C
+  if (( $(echo "$max_hotspot >= 90 && $max_hotspot < 95" | bc -l 2>/dev/null || echo 0) )); then
+    echo "WARM"
+    return
+  fi
+  
+  # CRITICAL: >= 95°C
+  if (( $(echo "$max_hotspot >= 95" | bc -l 2>/dev/null || echo 0) )); then
+    echo "CRITICAL"
+    return
+  fi
+  
+  echo "UNKNOWN"
+}
+
+# Get GHUL Hellfire Cooling Rating
+get_ghul_rating()  {
+  local max_temp="$1"
+  local was_aborted="${2:-0}"
+  local test_status="${3:-PASS}"
+  local component="${4:-CPU}"  # CPU, GPU, or RAM
+  
+  # Special case: user abort
+  if [[ "$test_status" == "FAILED" ]]; then
+    echo "ABORTED"
+    return
+  fi
+  
+  if [[ -z "$max_temp" || "$max_temp" == "null" ]]; then
+    echo "UNKNOWN"
+    return
+  fi
+  
+  # If test was aborted due to temperature, it's CRITICAL
+  if [[ "$was_aborted" == "1" ]]; then
+    echo "CRITICAL"
+    return
+  fi
+  
+  # Compare as floating point (different thresholds for RAM)
+  if [[ "$component" == "RAM" ]]; then
+    if (( $(echo "$max_temp < 65" | bc -l 2>/dev/null || echo 0) )); then
+      echo "EXCELLENT"
+    elif (( $(echo "$max_temp < 75" | bc -l 2>/dev/null || echo 0) )); then
+      echo "OK"
+    elif (( $(echo "$max_temp < 85" | bc -l 2>/dev/null || echo 0) )); then
+      echo "WARM"
+    elif (( $(echo "$max_temp >= 85" | bc -l 2>/dev/null || echo 0) )); then
+      echo "CRITICAL"
+    else
+      echo "UNKNOWN"
+    fi
+  else
+    # CPU/GPU thresholds
+    if (( $(echo "$max_temp < 65" | bc -l 2>/dev/null || echo 0) )); then
+      echo "EXCELLENT"
+    elif (( $(echo "$max_temp < 75" | bc -l 2>/dev/null || echo 0) )); then
+      echo "OK"
+    elif (( $(echo "$max_temp < 90" | bc -l 2>/dev/null || echo 0) )); then
+      echo "WARM"
+    elif (( $(echo "$max_temp >= 90" | bc -l 2>/dev/null || echo 0) )); then
+      echo "CRITICAL"
+    else
+      echo "UNKNOWN"
+    fi
+  fi
+}
+
+# Print GHUL Hellfire Cooling Rating
+print_ghul_rating()  {
+  local rating="$1"
+  local max_temp="$2"
+  local test_status="${3:-PASS}"
+  local component="${4:-CPU}"  # CPU or GPU
+  
+  # Note: Header is printed in print_test_summary, this function only prints the rating details
+  
+  case "$rating" in
+    EXCELLENT)
+      if [[ "$component" == "GPU" ]]; then
+        green "  EXCELLENT"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  max Temp < 65°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  max Temp < 65°C"
+        fi
+        echo "  This is an illegal level of cooling performance. Your cooler laughs at Hellfire. Your RIG is born to overclock."
+      elif [[ "$component" == "RAM" ]]; then
+        green "  EXCELLENT"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  max Temp < 65°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  max Temp < 65°C"
+        fi
+        echo "  Your DIMMs are chilling. Maximum stability achieved. Maybe you should consider a frequency boost and higher voltage?"
+      else
+        green "  EXCELLENT"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  max Temp < 65°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  max Temp < 65°C"
+        fi
+        echo "  This cooling performance is sick. You were born to overclock."
+      fi
+      ;;
+    OK)
+      if [[ "$component" == "GPU" ]]; then
+        green "  OK"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  65–75°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  65–75°C"
+        fi
+        echo "  This cooler can handle raids, boss fights and your bad decisions relaxed."
+      elif [[ "$component" == "RAM" ]]; then
+        green "  OK"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  65–75°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  65–75°C"
+        fi
+        echo "  Not cold, not hot — just right for battle."
+      else
+        green "  OK"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  65–75°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  65–75°C"
+        fi
+        echo "  Solid. Gaming workout 24h daily, no sweat."
+      fi
+      ;;
+    WARM)
+      if [[ "$component" == "GPU" ]]; then
+        yellow "  WARM"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  75–90°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  75–90°C"
+        fi
+        echo "  Your GPU is preheating the room. Might be time for a cleaning?"
+      elif [[ "$component" == "RAM" ]]; then
+        yellow "  WARM"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  75–85°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  75–85°C"
+        fi
+        echo "  This is the 'I can continue, but I won't like it' zone:"
+        echo "     Thermal paste won't fix this - airflow might..."
+      else
+        yellow "  WARM"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  75–90°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  75–90°C"
+        fi
+        echo "  You are hot: Check airflow, paste, dust, fan curves."
+      fi
+      ;;
+    CRITICAL)
+      if [[ "$component" == "GPU" ]]; then
+        red "  CRITICAL"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  ≥90°C oder Safety-Stop - your max: '"${max_temp}"'°C'
+        else
+          echo "  ≥90°C oder Safety-Stop"
+        fi
+        echo "  Your GPU is forging a new planet core. Stop the run... NOW!"
+      elif [[ "$component" == "RAM" ]]; then
+        red "  CRITICAL"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  ≥85°C - your max: '"${max_temp}"'°C'
+        else
+          echo "  ≥85°C"
+        fi
+        echo "  Memory meltdown detected. These bits are going places they shouldn't."
+        echo "     The GHUL Hellfire has revealed weaknesses in your memory… and your cooling."
+      else
+        red "  CRITICAL"
+        if [[ -n "$max_temp" && "$max_temp" != "null" ]]; then
+          echo '  ≥90°C oder Safety-Stop - your max: '"${max_temp}"'°C'
+        else
+          echo "  ≥90°C oder Safety-Stop"
+        fi
+        echo "  Cooling insufficient for Hellfire. This rig will die sooner rather than later."
+      fi
+      ;;
+    ABORTED)
+      yellow "  ABORTED"
+      if [[ "$component" == "RAM" ]]; then
+        echo "  Abort acknowledged. RAM integrity preserved."
+      else
+        echo "  Hellfire run aborted: no guts today — no RMA tomorrow."
+        echo "  Your CPU thanks you."
+      fi
+      ;;
+    *
+      yellow "  UNKNOWN"
+      echo "  Temperature data not available."
+      ;;
+  esac
+  
+  # Bonus flavor text for RAM (if test passed)
+  if [[ "$component" == "RAM" && "$test_status" == "PASS" && "$rating" != "ABORTED" ]]; then
+    echo
+    green "  Bonus Flavor:"
+    echo "  0 errors detected — your RAM has a PhD in stability."
+    echo "  Corrected 0, uncorrectable 0 - your DIMMs meditate under pressure."
+    echo "  Memory controller behaved impeccably."
+    echo "  Unlike most humans."
+    echo
+    green "  Temperature OK, errors zero — proceed to GPU sacrifice"
+  fi
+  
+  echo
+}
+
+# Print test summary
+print_test_summary()  {
+  local test_name="$1"
+  local duration="$2"
+  local test_status="${3:-PASS}"  # PASS or ABORTED
+  local abort_reason="${4:-}"     # Reason for abort (e.g., "CPU limit exceeded for 7s")
+  local sensor_log_pattern="${LOGDIR}/*-${HOST}-${test_name}-sensors.jsonl"
+  local cpu_limit=100.0  # CPU temperature limit in °C
+  local gpu_limit=100.0  # GPU temperature limit in °C
+  
+  echo
+  green "╔═══════════════════════════════════════════════════════════════╗"
+  green "║                     TEST COMPLETE                             ║"
+  green "╚═══════════════════════════════════════════════════════════════╝"
+  echo
+  green "  Test: $test_name"
+  green "  Duration: $duration seconds"
+  
+  # Find sensor log file
+  local log_file=""
+  if ls ${sensor_log_pattern} 2>/dev/null | head -1 | grep -q .; then
+    log_file="$(ls -t ${sensor_log_pattern} 2>/dev/null | head -1)"
+    green "  Sensor log: $log_file"
+    echo
+  elif [[ "$test_status" == "FAILED" ]] && [[ -n "${HELLFIRE_GPU_SAFETY_FAILED:-}" ]]; then
+    # Safety stop happened very early (before logging started)
+    yellow "  Sensor log: Not available"
+    yellow "  Run aborted by safety guard before logging phase."
+    echo
+    # Skip to result section - no log file available
+    log_file=""
+  fi
+  
+  if [[ -n "$log_file" ]]; then
+    # Parse sensor log and display temperature statistics
+    local temp_stats
+    temp_stats="$(parse_sensor_log "$log_file")"
+    
+    if [[ -n "$temp_stats" ]]; then
+      # Source the stats as variables
+      eval "$temp_stats"
+      
+      echo "  Temperature Statistics:"
+      echo
+      
+      # CPU temperatures
+      if [[ -n "${CPU_TEMP_MIN:-}" ]]; then
+        printf '    CPU Temperature:     min=%.1f°C  avg=%.1f°C  max=%.1f°C  - limit: %.0f°C, samples: %d\n' "$CPU_TEMP_MIN" "$CPU_TEMP_AVG" "$CPU_TEMP_MAX" "$cpu_limit" "$CPU_TEMP_COUNT"
+      else
+        echo "    CPU Temperature:     n/a"
+      fi
+      
+      # GPU edge temperatures
+      if [[ -n "${GPU_TEMP_MIN:-}" ]]; then
+        printf '    GPU Edge Temperature: min=%.1f°C  avg=%.1f°C  max=%.1f°C  - limit: %.0f°C, samples: %d\n' "$GPU_TEMP_MIN" "$GPU_TEMP_AVG" "$GPU_TEMP_MAX" "$gpu_limit" "$GPU_TEMP_COUNT"
+      else
+        echo "    GPU Edge Temperature: n/a"
+      fi
+      
+      # GPU hotspot temperatures
+      if [[ -n "${GPU_HOTSPOT_MIN:-}" ]]; then
+        printf '    GPU Hotspot Temp:     min=%.1f°C  avg=%.1f°C  max=%.1f°C  - limit: %.0f°C, samples: %d\n' "$GPU_HOTSPOT_MIN" "$GPU_HOTSPOT_AVG" "$GPU_HOTSPOT_MAX" "$gpu_limit" "$GPU_HOTSPOT_COUNT"
+      else
+        echo "    GPU Hotspot Temperature: n/a"
+      fi
+      
+      echo
+      
+      # Determine component from test name
+      local component="CPU"
+      if [[ "$test_name" == "ram" ]]; then
+        component="RAM"
+      elif [[ "$test_name" == "gpu" ]]; then
+        component="GPU"
+      fi
+      
+      # GPU-specific output
+      if [[ "$component" == "GPU" ]]; then
+        local was_aborted=0
+        if [[ "$test_status" == "ABORTED" || "$test_status" == "FAILED" ]]; then
+          was_aborted=1
+        fi
+        
+        # GPU VRAM temperature display
+        if [[ -n "${GPU_VRAM_MIN:-}" ]]; then
+          printf '    GPU VRAM Temperature:  min=%.1f°C  avg=%.1f°C  max=%.1f°C  - limit: 90°C, samples: %d\n' "$GPU_VRAM_MIN" "$GPU_VRAM_AVG" "$GPU_VRAM_MAX" "$GPU_VRAM_COUNT"
+        else
+          echo "    GPU VRAM Temperature:  n/a"
+        fi
+        
+        # GPU Power display
+        if [[ -n "${GPU_POWER_MIN:-}" ]]; then
+          printf '    GPU Power Draw:        min=%.1fW  avg=%.1fW  max=%.1fW  - samples: %d\n' "$GPU_POWER_MIN" "$GPU_POWER_AVG" "$GPU_POWER_MAX" "$GPU_POWER_COUNT"
+        else
+          echo "    GPU Power Draw:        n/a"
+        fi
+        
+        # GPU Fan display (AMD = RPM, NVIDIA = %)
+        if [[ -n "${GPU_FAN_MIN:-}" ]]; then
+          # Detect GPU vendor to determine unit
+          local gpu_vendor_display
+          gpu_vendor_display="$(detect_gpu_vendor 2>/dev/null || echo "unknown")"
+          if [[ "$gpu_vendor_display" == "nvidia" ]]; then
+            # NVIDIA: percentage
+            printf '    GPU Fan Speed:         min=%.0f%%  avg=%.0f%%  max=%.0f%%  - samples: %d\n' "$GPU_FAN_MIN" "$GPU_FAN_AVG" "$GPU_FAN_MAX" "$GPU_FAN_COUNT"
+          else
+            # AMD or unknown: RPM
+            printf '    GPU Fan Speed:         min=%.0f RPM  avg=%.0f RPM  max=%.0f RPM  - samples: %d\n' "$GPU_FAN_MIN" "$GPU_FAN_AVG" "$GPU_FAN_MAX" "$GPU_FAN_COUNT"
+          fi
+        else
+          echo "    GPU Fan Speed:         n/a"
+        fi
+        
+        echo
+        
+        # Overall Thermal Status (based on CPU max temperature - skip if user abort)
+        if [[ "$test_status" != "FAILED" ]] && [[ -n "${CPU_TEMP_MAX:-}" ]]; then
+          local thermal_status
+          thermal_status="$(get_thermal_status "$CPU_TEMP_MAX" "$cpu_limit" "$was_aborted" "CPU")"
+          print_thermal_status "$thermal_status" "$CPU_TEMP_MAX" "$cpu_limit" "$test_status"
+        fi
+        
+        # GPU Thermal Status (based on Hotspot + VRAM)
+        if [[ "$test_status" != "FAILED" ]] && [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
+          local gpu_thermal_status
+          gpu_thermal_status="$(get_gpu_thermal_status "${GPU_HOTSPOT_MAX:-null}" "${GPU_VRAM_MAX:-null}" "$was_aborted")"
+          print_gpu_thermal_status "$gpu_thermal_status" "${GPU_HOTSPOT_MAX:-null}" "${GPU_VRAM_MAX:-null}"
+        fi
+        
+        echo
+        
+        # GHUL Hellfire GPU Rating (header - appears above ratings)
+        echo "  🥇 GHUL Hellfire GPU Rating v1.0"
+        echo
+        
+        # GHUL Hellfire GPU Rating (based on Hotspot bands)
+        if [[ "$test_status" != "FAILED" ]] && [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
+          local gpu_ghul_rating
+          gpu_ghul_rating="$(get_gpu_ghul_rating "${GPU_HOTSPOT_MAX:-null}" "$was_aborted" "$test_status")"
+          print_gpu_ghul_rating "$gpu_ghul_rating" "${GPU_HOTSPOT_MAX:-null}" "${GPU_VRAM_MAX:-null}" "$test_status"
+        elif [[ "$test_status" == "FAILED" ]]; then
+          # Safety stop triggered
+          red "  Hellfire Safety Stop triggered:"
+          if [[ -n "${HELLFIRE_GPU_SAFETY_REASON:-}" ]]; then
+            red "  Reason: ${HELLFIRE_GPU_SAFETY_REASON}"
+          fi
+          if [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
+            echo "  Max Hotspot: ${GPU_HOTSPOT_MAX}°C"
+          fi
+          if [[ -n "${GPU_VRAM_MAX:-}" ]]; then
+            echo "  Max VRAM: ${GPU_VRAM_MAX}°C"
+          fi
+          echo
+          echo "  Congratulations. You almost forged a new planet core."
+          echo
+        fi
+      else
+        # CPU/RAM output (existing logic)
+        # Overall Thermal Status (based on CPU max temperature - skip if user abort)
+        if [[ "$test_status" != "FAILED" ]] && [[ -n "${CPU_TEMP_MAX:-}" ]]; then
+          local was_aborted=0
+          if [[ "$test_status" == "ABORTED" ]]; then
+            was_aborted=1
+          fi
+          local thermal_status
+          thermal_status="$(get_thermal_status "$CPU_TEMP_MAX" "$cpu_limit" "$was_aborted" "CPU")"
+          print_thermal_status "$thermal_status" "$CPU_TEMP_MAX" "$cpu_limit" "$test_status"
+          
+          # RAM Thermal Status (only for RAM tests)
+          if [[ "$component" == "RAM" ]]; then
+            # Use CPU temp for RAM thermal status (no dedicated RAM sensor)
+            local ram_thermal_status
+            ram_thermal_status="$(get_thermal_status "$CPU_TEMP_MAX" "$cpu_limit" "$was_aborted" "RAM")"
+            print_ram_thermal_status "$ram_thermal_status" "$CPU_TEMP_MAX" "$cpu_limit"
+          fi
+          
+          echo
+          
+          # GHUL Hellfire Cooling Rating (header - appears above ratings)
+          echo "  🥇 GHUL Hellfire Cooling Rating v1.0"
+          echo
+          
+          # GHUL Hellfire Cooling Rating (component-specific rating)
+          local ghul_rating
+          ghul_rating="$(get_ghul_rating "$CPU_TEMP_MAX" "$was_aborted" "$test_status" "$component")"
+          print_ghul_rating "$ghul_rating" "$CPU_TEMP_MAX" "$test_status" "$component"
+        elif [[ "$test_status" == "FAILED" ]]; then
+          # User abort - show insufficient status even without temp data
+          print_thermal_status "INSUFFICIENT" "" "" "$test_status"
+          echo
+          
+          # GHUL Hellfire Cooling Rating (header - appears above ratings)
+          echo "  🥇 GHUL Hellfire Cooling Rating v1.0"
+          echo
+          
+          # GHUL Rating for user abort
+          print_ghul_rating "ABORTED" "" "$test_status" "$component"
+        fi
+      fi
+    else
+      # Only show warning if it wasn't a safety stop
+      if [[ "$test_status" != "FAILED" ]] || [[ -z "${HELLFIRE_GPU_SAFETY_FAILED:-}" ]]; then
+        yellow "    Warning: Could not parse sensor log or no temperature data found"
+        echo
+      fi
+    fi
+  elif [[ -z "$log_file" ]] && { [[ "$test_status" != "FAILED" ]] || [[ -z "${HELLFIRE_GPU_SAFETY_FAILED:-}" ]]; }; then
+    # Only show warning if it wasn't a safety stop (already handled above)
+    yellow "  Warning: Sensor log not found"
+    echo
+  fi
+  
+  # Test result (always show, even if no log file)
+  if [[ "$test_status" == "PASS" ]]; then
+    green "  Result: PASS – no thermal limit reached, no abort triggered."
+  elif [[ "$test_status" == "ABORTED" ]]; then
+    red "  Result: ABORTED"
+    if [[ -n "$abort_reason" ]]; then
+      red "         $abort_reason"
+    fi
+  elif [[ "$test_status" == "FAILED" ]]; then
+    red "  Result: FAILED"
+    if [[ -n "$abort_reason" ]]; then
+      red "         $abort_reason"
+    fi
+  else
+    yellow "  Result: $test_status"
+  fi
+  echo
+}
+

@@ -993,10 +993,16 @@ if have vkmark; then
   cat "$tmp_log" >"$vk_log"
   
   # v0.2: Handle NVIDIA vkmark limitation (proprietary driver)
-  # If GPU vendor is NVIDIA and score is 0, set score to null and add note
-  if [[ "$gpu_vendor" == "nvidia" && "$score" == "0" ]]; then
+  # Only set to null if the run actually failed (score = 0 AND no scenes found)
+  # With newer kernels (6.17+) and Mesa, vkmark can work on NVIDIA
+  local scenes_count
+  scenes_count="$(printf '%s' "$SCENES_JSON" | jq 'length' 2>/dev/null || echo 0)"
+  
+  if [[ "$gpu_vendor" == "nvidia" && "$score" == "0" && "$scenes_count" == "0" ]]; then
+    # Run failed: no score and no scenes = driver limitation or error
     GPU_JSON="$(printf '%s' "$GPU_JSON" | jq '. + {vkmark_score: null, vkmark_note: "Skipped on NVIDIA (proprietary driver limitation)", vkmark_scenes: {}}')"
   else
+    # Run succeeded (or score > 0): use the actual score
     GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --arg s "${score}" '. + {vkmark_score: ($s|tonumber? // 0)}')"
     GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --argjson obj "$SCENES_JSON" '. + {vkmark_scenes: $obj}')"
   fi

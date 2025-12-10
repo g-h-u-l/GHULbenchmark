@@ -232,7 +232,8 @@ This version includes all features from v0.1 plus:
 - ✅ Warnings displayed in both `ghul-quickcheck.sh` and `ghul-report.sh`
 
 ### vkmark Handling
-- ✅ **NVIDIA vkmark Limitation**: Automatically detects when vkmark fails on NVIDIA (proprietary driver limitation) and sets score to `null` with explanatory note
+- ✅ **NVIDIA vkmark Support**: With newer kernels (6.17+) and Mesa, vkmark can work on NVIDIA GPUs
+- ✅ **Automatic Fallback**: If vkmark fails on NVIDIA (score = 0 and no scenes found), score is set to `null` with explanatory note
 
 ### Improved JSON Output
 - ✅ All sensor values properly sanitized (missing values = `null`)

@@ -783,16 +783,24 @@ fi
 # Normal Mode: Sensor Logging
 # ============================================================================
 
-# Ensure log folder exists
-SENSLOG_DIR="${BASE}/logs/sensors"
-mkdir -p "$SENSLOG_DIR"
-
-# Use run timestamp from ghul-benchmark if provided, else fallback.
-# Format: YYYY-mm-dd-HH-MM (no seconds)
-TS_RUN="${GHUL_RUN_TS:-$(date +%Y-%m-%d-%H-%M)}"
-OUTFILE="${SENSLOG_DIR}/${TS_RUN}-${HOST}-sensors.jsonl"
-
-echo "[GHUL] Sensors helper writing to: $OUTFILE" >&2
+# Check if output file is provided as argument (for hellfire tests)
+if [[ -n "${1:-}" && "$1" != "--dump-layout" && "$1" =~ \.jsonl$ ]]; then
+  # Output file provided as argument (for hellfire)
+  OUTFILE="$1"
+  mkdir -p "$(dirname "$OUTFILE")"
+  echo "[GHUL] Sensors helper writing to: $OUTFILE" >&2
+else
+  # Normal mode: use default location
+  SENSLOG_DIR="${BASE}/logs/sensors"
+  mkdir -p "$SENSLOG_DIR"
+  
+  # Use run timestamp from ghul-benchmark if provided, else fallback.
+  # Format: YYYY-mm-dd-HH-MM (no seconds)
+  TS_RUN="${GHUL_RUN_TS:-$(date +%Y-%m-%d-%H-%M)}"
+  OUTFILE="${SENSLOG_DIR}/${TS_RUN}-${HOST}-sensors.jsonl"
+  
+  echo "[GHUL] Sensors helper writing to: $OUTFILE" >&2
+fi
 
 # Optionally write PID file (so ghul-benchmark can stop us cleanly)
 if [[ -n "${GHUL_SENSORS_PIDFILE:-}" ]]; then
