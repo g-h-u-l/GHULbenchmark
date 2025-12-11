@@ -24,3 +24,6 @@ Thumbs.db
 # Upload guides (only for developer)
 GITHUB_UPLOAD*.md
 
+# Feature requests (only for developer)
+AMD_FEATURE_REQUEST.md
+

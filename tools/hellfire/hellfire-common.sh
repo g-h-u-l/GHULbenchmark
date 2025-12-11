@@ -259,10 +259,11 @@ detect_gpu_vendor() {
     return
   fi
   
-  if echo "$lspci_line" | grep -qi "amd\|ati\|radeon"; then
-    echo "amd"
-  elif echo "$lspci_line" | grep -qi "nvidia\|geforce"; then
+  # Check NVIDIA first (to avoid matching "ati" in "Corporation")
+  if echo "$lspci_line" | grep -qiE "nvidia|geforce"; then
     echo "nvidia"
+  elif echo "$lspci_line" | grep -qiE "amd|ati|radeon"; then
+    echo "amd"
   elif echo "$lspci_line" | grep -qi "intel"; then
     echo "intel"
   else
@@ -359,34 +360,45 @@ read_amd_gpu_sensors() {
 
 read_nvidia_gpu_sensors() {
   if ! have nvidia-smi; then
-    echo "null|null|null"
+    echo "null|null|null|null|null"
     return
   fi
   
+  # Query GPU temperature, memory temperature (if available), fan speed, and power
   local nvidia_output
-  nvidia_output="$(nvidia-smi --query-gpu=temperature.gpu,fan.speed,power.draw --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "")"
+  nvidia_output="$(nvidia-smi --query-gpu=temperature.gpu,temperature.memory,fan.speed,power.draw --format=csv,noheader,nounits 2>/dev/null | head -n1 || echo "")"
   
-  local temp="null"
+  local edge="null"
+  local hotspot="null"  # NVIDIA doesn't expose hotspot separately
+  local vram="null"
   local fan="null"
   local power="null"
   
   if [[ -n "$nvidia_output" ]]; then
-    temp="$(echo "$nvidia_output" | cut -d',' -f1 | xargs || echo "")"
-    fan="$(echo "$nvidia_output" | cut -d',' -f2 | xargs || echo "")"
-    power="$(echo "$nvidia_output" | cut -d',' -f3 | xargs || echo "")"
+    edge="$(echo "$nvidia_output" | cut -d',' -f1 | xargs || echo "")"
+    vram="$(echo "$nvidia_output" | cut -d',' -f2 | xargs || echo "")"
+    fan="$(echo "$nvidia_output" | cut -d',' -f3 | xargs || echo "")"
+    power="$(echo "$nvidia_output" | cut -d',' -f4 | xargs || echo "")"
     
     # Remove % from fan speed
     if [[ -n "$fan" && "$fan" != "null" ]]; then
       fan="$(echo "$fan" | sed 's/%//' | xargs || echo "")"
     fi
     
+    # Handle "N/A" for memory temperature (older GPUs don't have VRAM sensors)
+    if [[ "$vram" == "N/A" || "$vram" == "n/a" || -z "$vram" ]]; then
+      vram="null"
+    fi
+    
     # Convert empty strings to null
-    [[ -z "$temp" ]] && temp="null"
+    [[ -z "$edge" ]] && edge="null"
+    [[ -z "$vram" ]] && vram="null"
     [[ -z "$fan" ]] && fan="null"
     [[ -z "$power" ]] && power="null"
   fi
   
-  echo "${temp}|${fan}|${power}"
+  # Return format: edge|hotspot|vram|power|fan (matches read_amd_gpu_sensors format)
+  echo "${edge}|${hotspot}|${vram}|${power}|${fan}"
 }
 
 get_gpu_power_limit() {
@@ -447,6 +459,10 @@ monitor_gpu_safety() {
   local hotspot_over_start=0
   local last_warning_time=0
   
+  # Status file for communication with main process
+  local status_file="${LOGDIR}/.gpu_safety_status_${test_name}"
+  rm -f "$status_file"
+  
   # Get power limit
   local power_limit
   power_limit="$(get_gpu_power_limit "$gpu_vendor")"
@@ -477,6 +493,9 @@ monitor_gpu_safety() {
     if [[ "$vram" != "null" && -n "$vram" ]] && (( $(echo "$vram > $vram_critical" | bc -l 2>/dev/null || echo 0) )); then
       export HELLFIRE_GPU_SAFETY_FAILED=1
       export HELLFIRE_GPU_SAFETY_REASON="VRAM temperature ${vram}°C exceeded ${vram_critical}°C"
+      # Write to status file for main process
+      echo "FAILED" > "$status_file"
+      echo "${HELLFIRE_GPU_SAFETY_REASON}" > "${status_file}.reason"
       red "  🚨 IMMEDIATE STOP: VRAM ${vram}°C > ${vram_critical}°C"
       kill "$stress_pid" 2>/dev/null || true
       break
@@ -503,6 +522,9 @@ monitor_gpu_safety() {
           if [[ $fan_fail_duration -ge $fan_delay ]]; then
             export HELLFIRE_GPU_SAFETY_FAILED=1
             export HELLFIRE_GPU_SAFETY_REASON="GPU fan speed ${fan}% < ${fan_critical}% while GPU was above safe temperature - Edge: ${edge}°C, Hotspot: ${hotspot}°C"
+            # Write to status file for main process
+            echo "FAILED" > "$status_file"
+            echo "${HELLFIRE_GPU_SAFETY_REASON}" > "${status_file}.reason"
             red "  🚨 DELAYED STOP: GPU fan speed ${fan}% < ${fan_critical}% for ${fan_fail_duration}s while GPU was warm"
             kill "$stress_pid" 2>/dev/null || true
             break
@@ -522,6 +544,9 @@ monitor_gpu_safety() {
       if (( $(echo "$power > $power_limit_max" | bc -l 2>/dev/null || echo 0) )); then
         export HELLFIRE_GPU_SAFETY_FAILED=1
         export HELLFIRE_GPU_SAFETY_REASON="GPU power draw ${power}W exceeded ${power_limit_max}W (${power_limit_mult}x limit)"
+        # Write to status file for main process
+        echo "FAILED" > "$status_file"
+        echo "${HELLFIRE_GPU_SAFETY_REASON}" > "${status_file}.reason"
         red "  🚨 IMMEDIATE STOP: GPU power ${power}W > ${power_limit_max}W"
         kill "$stress_pid" 2>/dev/null || true
         break
@@ -538,13 +563,16 @@ monitor_gpu_safety() {
         local hotspot_duration
         hotspot_duration=$((current_time - hotspot_over_start))
         
-        if [[ $hotspot_duration -ge 2 ]]; then
-          export HELLFIRE_GPU_SAFETY_FAILED=1
-          export HELLFIRE_GPU_SAFETY_REASON="Hotspot temperature exceeded ${hotspot_critical}°C for ${hotspot_duration}s - current: ${hotspot}°C"
-          red "  🚨 DELAYED STOP: Hotspot ${hotspot}°C > ${hotspot_critical}°C for ${hotspot_duration}s"
-          kill "$stress_pid" 2>/dev/null || true
-          break
-        fi
+          if [[ $hotspot_duration -ge 2 ]]; then
+            export HELLFIRE_GPU_SAFETY_FAILED=1
+            export HELLFIRE_GPU_SAFETY_REASON="Hotspot temperature exceeded ${hotspot_critical}°C for ${hotspot_duration}s - current: ${hotspot}°C"
+            # Write to status file for main process
+            echo "FAILED" > "$status_file"
+            echo "${HELLFIRE_GPU_SAFETY_REASON}" > "${status_file}.reason"
+            red "  🚨 DELAYED STOP: Hotspot ${hotspot}°C > ${hotspot_critical}°C for ${hotspot_duration}s"
+            kill "$stress_pid" 2>/dev/null || true
+            break
+          fi
       else
         hotspot_over_start=0
       fi
@@ -1376,9 +1404,12 @@ print_test_summary() {
   # Find sensor log file (if not already found)
   local show_temp_stats=1
   
-  # Skip temperature statistics and ratings for user aborts
+  # Skip temperature statistics and ratings for user aborts and safety stops
   if [[ "$test_status" == "ABORTED" ]] && [[ -n "${HELLFIRE_USER_ABORTED:-}" ]]; then
     # User abort - skip all temperature statistics and ratings
+    show_temp_stats=0
+  elif [[ "$test_status" == "FAILED" ]]; then
+    # Safety stop - skip temperature statistics and ratings, show only essential info
     show_temp_stats=0
   fi
   
@@ -1469,7 +1500,12 @@ print_test_summary() {
         # GPU Fan display (AMD = RPM, NVIDIA = %)
         if [[ -n "${GPU_FAN_MIN:-}" ]]; then
           local gpu_vendor_display
-          gpu_vendor_display="$(detect_gpu_vendor 2>/dev/null || echo "unknown")"
+          # Use exported GPU vendor if available (from GPU test), otherwise detect
+          if [[ -n "${HELLFIRE_GPU_VENDOR:-}" ]]; then
+            gpu_vendor_display="${HELLFIRE_GPU_VENDOR}"
+          else
+            gpu_vendor_display="$(detect_gpu_vendor 2>/dev/null || echo "unknown")"
+          fi
           if [[ "$gpu_vendor_display" == "nvidia" ]]; then
             printf '    GPU Fan Speed:         min=%.0f%%  avg=%.0f%%  max=%.0f%%  - samples: %d\n' "$GPU_FAN_MIN" "$GPU_FAN_AVG" "$GPU_FAN_MAX" "$GPU_FAN_COUNT"
           else
@@ -1497,31 +1533,19 @@ print_test_summary() {
         
         echo
         
-        # GHUL Hellfire GPU Rating (header only once)
-        echo "  🥇 GHUL Hellfire GPU Rating v1.0"
-        echo
-        
-        if [[ "$test_status" == "ABORTED" ]]; then
-          # User abort - show ABORTED rating (no header, already printed)
-          print_gpu_ghul_rating "ABORTED" "${GPU_HOTSPOT_MAX:-null}" "${GPU_VRAM_MAX:-null}" "$test_status" "0"
-        elif [[ "$test_status" != "FAILED" ]] && [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
-          local gpu_ghul_rating
-          gpu_ghul_rating="$(get_gpu_ghul_rating "${GPU_HOTSPOT_MAX:-null}" "$was_aborted" "$test_status")"
-          print_gpu_ghul_rating "$gpu_ghul_rating" "${GPU_HOTSPOT_MAX:-null}" "${GPU_VRAM_MAX:-null}" "$test_status" "0"
-        elif [[ "$test_status" == "FAILED" ]]; then
-          red "  Hellfire Safety Stop triggered:"
-          if [[ -n "${HELLFIRE_GPU_SAFETY_REASON:-}" ]]; then
-            red "  Reason: ${HELLFIRE_GPU_SAFETY_REASON}"
-          fi
-          if [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
-            echo "  Max Hotspot: ${GPU_HOTSPOT_MAX}°C"
-          fi
-          if [[ -n "${GPU_VRAM_MAX:-}" ]]; then
-            echo "  Max VRAM: ${GPU_VRAM_MAX}°C"
-          fi
+        # GHUL Hellfire GPU Rating (only show if not FAILED)
+        if [[ "$test_status" != "FAILED" ]]; then
+          echo "  🥇 GHUL Hellfire GPU Rating v1.0"
           echo
-          echo "  Congratulations. You almost forged a new planet core."
-          echo
+          
+          if [[ "$test_status" == "ABORTED" ]]; then
+            # User abort - show ABORTED rating (no header, already printed)
+            print_gpu_ghul_rating "ABORTED" "${GPU_HOTSPOT_MAX:-null}" "${GPU_VRAM_MAX:-null}" "$test_status" "0"
+          elif [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
+            local gpu_ghul_rating
+            gpu_ghul_rating="$(get_gpu_ghul_rating "${GPU_HOTSPOT_MAX:-null}" "$was_aborted" "$test_status")"
+            print_gpu_ghul_rating "$gpu_ghul_rating" "${GPU_HOTSPOT_MAX:-null}" "${GPU_VRAM_MAX:-null}" "$test_status" "0"
+          fi
         fi
       else
         # CPU/RAM output
@@ -1584,9 +1608,18 @@ print_test_summary() {
       red "         $abort_reason"
     fi
   elif [[ "$test_status" == "FAILED" ]]; then
+    # For FAILED tests, show only essential info (no temperature stats, no rating)
+    red "  ⚠️  Test was aborted immediately to prevent hardware damage."
+    echo
+    echo "  Congratulations. You almost forged a new planet core."
+    echo
     red "  Result: FAILED"
     if [[ -n "$abort_reason" ]]; then
-      red "         $abort_reason"
+      red "  Reason: $abort_reason"
+    elif [[ -n "${HELLFIRE_GPU_SAFETY_REASON:-}" ]]; then
+      red "  Reason: ${HELLFIRE_GPU_SAFETY_REASON}"
+    else
+      red "  Reason: Hellfire Safety Stop triggered"
     fi
   fi
   

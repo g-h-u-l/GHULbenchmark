@@ -79,6 +79,9 @@ main() {
     exit 1
   fi
   
+  # Export GPU vendor for use in print_test_summary
+  export HELLFIRE_GPU_VENDOR="$gpu_vendor"
+  
   green "  Duration: ${DURATION} seconds"
   echo
   
@@ -107,7 +110,7 @@ main() {
   elif have gputest; then
     # Fallback: Use GpuTest FurMark for maximum GPU load
     # Note: We run it without /benchmark for permanent stress, and kill it after duration
-    yellow "  ⚠️  NOTE: A result window will pop up. Close it to allow the script to finish cleanly."
+    yellow "  ⚠️  NOTE: A FurMark window will pop up. Leave it open - it will close automatically when the test completes."
     echo
     gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /msaa=5 \
       > "${LOGDIR}/$(get_timestamp)-${HOST}-gpu-stress.log" 2>&1 &
@@ -137,8 +140,14 @@ main() {
     local end_time
     end_time=$((start_time + DURATION))
     
-    # Wait for duration or until process dies
+    # Wait for duration or until process dies (or safety stop)
     while [[ $(date +%s) -lt $end_time ]]; do
+      # Check if safety stop was triggered
+      local status_file="${LOGDIR}/.gpu_safety_status_${HELLFIRE_TEST_NAME}"
+      if [[ -f "$status_file" ]]; then
+        # Safety stop triggered - break immediately
+        break
+      fi
       if ! kill -0 "$stress_pid" 2>/dev/null; then
         # Process already died
         break
@@ -182,11 +191,31 @@ main() {
     wait "$stress_pid" 2>/dev/null || true
   fi
   
-  # Stop monitoring
+  # Stop monitoring and wait for it to finish
   kill "$monitor_pid" 2>/dev/null || true
   wait "$monitor_pid" 2>/dev/null || true
   
-  # Check test status
+  # Check test status (read from status file if available, fallback to env var)
+  local status_file="${LOGDIR}/.gpu_safety_status_${HELLFIRE_TEST_NAME}"
+  if [[ -f "$status_file" ]]; then
+    local safety_status
+    safety_status="$(cat "$status_file" 2>/dev/null || echo "")"
+    if [[ "$safety_status" == "FAILED" ]]; then
+      test_status="FAILED"
+      if [[ -f "${status_file}.reason" ]]; then
+        abort_reason="$(cat "${status_file}.reason" 2>/dev/null || echo "Hellfire Safety Stop triggered")"
+      else
+        abort_reason="Hellfire Safety Stop triggered"
+      fi
+      export HELLFIRE_GPU_SAFETY_FAILED=1
+      export HELLFIRE_GPU_SAFETY_REASON="$abort_reason"
+      red "  Test aborted due to GPU safety stop"
+      # Clean up status file
+      rm -f "$status_file" "${status_file}.reason" 2>/dev/null || true
+    fi
+  fi
+  
+  # Check test status (fallback to env var)
   if [[ -n "${HELLFIRE_USER_ABORTED:-}" ]]; then
     exit 0  # Handled by cleanup trap
   elif [[ -n "${HELLFIRE_GPU_SAFETY_FAILED:-}" ]]; then
