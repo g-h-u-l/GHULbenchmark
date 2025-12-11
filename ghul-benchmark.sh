@@ -100,14 +100,25 @@ check_for_updates() {
       grep -o '"tag_name": "[^"]*' | cut -d'"' -f4 | sed 's/^v//' || echo "")"
   fi
   
-  # If no release found, try to get version from main branch (fallback)
+  # If no release found, try to get latest tag from GitHub Tags API (fallback 1)
+  if [[ -z "$latest_version" ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      latest_version="$(curl -s "https://api.github.com/repos/${GHUL_REPO}/tags" 2>/dev/null | \
+        grep -o '"name": "v[^"]*' | head -1 | cut -d'"' -f4 | sed 's/^v//' || echo "")"
+    elif command -v wget >/dev/null 2>&1; then
+      latest_version="$(wget -qO- "https://api.github.com/repos/${GHUL_REPO}/tags" 2>/dev/null | \
+        grep -o '"name": "v[^"]*' | head -1 | cut -d'"' -f4 | sed 's/^v//' || echo "")"
+    fi
+  fi
+  
+  # If still no version found, try to get version from main branch (fallback 2)
   if [[ -z "$latest_version" ]]; then
     if command -v curl >/dev/null 2>&1; then
       latest_version="$(curl -s "https://raw.githubusercontent.com/${GHUL_REPO}/main/ghul-benchmark.sh" 2>/dev/null | \
-        grep -m1 '^GHUL_VERSION=' | cut -d'"' -f2 || echo "")"
+        grep -m1 '^GHUL_VERSION=' | sed -n 's/.*GHUL_VERSION="\([^"]*\)".*/\1/p' || echo "")"
     elif command -v wget >/dev/null 2>&1; then
       latest_version="$(wget -qO- "https://raw.githubusercontent.com/${GHUL_REPO}/main/ghul-benchmark.sh" 2>/dev/null | \
-        grep -m1 '^GHUL_VERSION=' | cut -d'"' -f2 || echo "")"
+        grep -m1 '^GHUL_VERSION=' | sed -n 's/.*GHUL_VERSION="\([^"]*\)".*/\1/p' || echo "")"
     fi
   fi
   
@@ -115,14 +126,20 @@ check_for_updates() {
   # Only show update message if latest_version is actually newer than current
   if [[ -n "$latest_version" && "$latest_version" != "$GHUL_VERSION" ]]; then
     # Simple version comparison: split by dots and compare numerically
-    local current_major current_minor latest_major latest_minor
-    IFS='.' read -r current_major current_minor <<< "$GHUL_VERSION"
-    IFS='.' read -r latest_major latest_minor <<< "$latest_version"
+    # Handle versions like "0.2", "0.3", "0.3.1", etc.
+    local current_major current_minor current_patch latest_major latest_minor latest_patch
+    IFS='.' read -r current_major current_minor current_patch <<< "${GHUL_VERSION}.0"
+    IFS='.' read -r latest_major latest_minor latest_patch <<< "${latest_version}.0"
+    
+    # Normalize patch version (default to 0 if empty)
+    [[ -z "$current_patch" ]] && current_patch=0
+    [[ -z "$latest_patch" ]] && latest_patch=0
     
     # Check if latest version is actually newer
     local is_newer=0
     if [[ "$latest_major" -gt "$current_major" ]] || \
-       ([[ "$latest_major" -eq "$current_major" ]] && [[ "$latest_minor" -gt "$current_minor" ]]); then
+       ([[ "$latest_major" -eq "$current_major" ]] && [[ "$latest_minor" -gt "$current_minor" ]]) || \
+       ([[ "$latest_major" -eq "$current_major" ]] && [[ "$latest_minor" -eq "$current_minor" ]] && [[ "$latest_patch" -gt "$current_patch" ]]); then
       is_newer=1
     fi
     
