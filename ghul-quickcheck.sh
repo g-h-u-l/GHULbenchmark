@@ -61,61 +61,107 @@ if ! have jq; then
   exit 1
 fi
 
-# ---------- result file selection ---------------------------------------------
+# ---------- help function -----------------------------------------------------
 
-if [[ $# -lt 1 ]]; then
-  red "[GHUL] No benchmark JSON file specified."
+show_help() {
+  echo "GHUL Quickcheck - Quick system assessment and rating"
   echo
   echo "Usage:"
-  echo "  ./ghul-quickcheck.sh <result.json | directory>"
+  echo "  ./ghul-quickcheck.sh [OPTIONS] [result.json | directory]"
+  echo
+  echo "Options:"
+  echo "  -h, --help    Show this help message"
+  echo
+  echo "Arguments:"
+  echo "  (none)       Use newest JSON from results/"
+  echo "  result.json  Use specific file (assumes results/ if no path separator)"
+  echo "  directory    Use newest JSON from specified directory"
   echo
   echo "Examples:"
-  echo "  ./ghul-quickcheck.sh 2025-11-29-13-39-sharkoon.json"
-  echo "  ./ghul-quickcheck.sh results/"
-  echo "  ./ghul-quickcheck.sh results"
+  echo "  ./ghul-quickcheck.sh                                    # Use newest JSON"
+  echo "  ./ghul-quickcheck.sh 2025-11-29-13-39-sharkoon.json     # Use specific file"
+  echo "  ./ghul-quickcheck.sh results/                            # Use newest from directory"
   echo
-  echo "Notes:"
-  echo "  - If you pass a filename without '/', quickcheck assumes it is inside 'results/'."
-  echo "  - If you pass a directory, quickcheck will automatically pick the newest JSON inside it."
-  exit 1
+  echo "Description:"
+  echo "  Shows a quick overview of your system's gaming performance with ratings"
+  echo "  for CPU, RAM, GPU, Storage, and Network. Includes thermal warnings."
+  echo
+  echo "Usage:"
+  echo "  Called directly: last benchmark gets analyzed."
+  echo "  With path like results/<benchmark> you can quickcheck any benchmark there"
+  exit 0
+}
+
+# Check for help flag
+if [[ $# -ge 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
 fi
 
-ARG="$1"
+# ---------- result file selection ---------------------------------------------
 
-# Case 1: argument is a directory → pick newest JSON inside it
-if [[ -d "$ARG" ]]; then
-  # normalize directory (remove trailing slash for ls, but doesn't matter here)
-  dir="$ARG"
-  RESULT_FILE=$(ls -1 "$dir"/*.json 2>/dev/null | sort | tail -n1 || true)
-
+# If no argument provided, use newest JSON from results/
+if [[ $# -lt 1 ]]; then
+  RESULT_FILE=$(ls -1t "${BASE}/results"/*.json 2>/dev/null | head -n1 || true)
+  
   if [[ -z "$RESULT_FILE" ]]; then
-    red "[GHUL] No JSON files found in directory:"
-    echo "       $dir"
-    exit 1
-  fi
-
-  echo "[GHUL] Using newest JSON from directory:"
-  echo "       $RESULT_FILE"
-
-else
-  # Case 2: argument contains "/" → treat as explicit file path
-  if [[ "$ARG" == */* ]]; then
-    RESULT_FILE="$ARG"
-  else
-    # Case 3: plain filename → assume inside results/
-    RESULT_FILE="results/$ARG"
-  fi
-
-  if [[ ! -f "$RESULT_FILE" ]]; then
-    red "[GHUL] Result file not found:"
-    echo "       $RESULT_FILE"
+    red "[GHUL] No benchmark JSON file specified and no JSON files found in results/."
     echo
-    echo "Make sure you pass an existing JSON file or a directory containing JSON results."
+    echo "Usage:"
+    echo "  ./ghul-quickcheck.sh [result.json | directory]"
+    echo
+    echo "Examples:"
+    echo "  ./ghul-quickcheck.sh                                    # Use newest JSON from results/"
+    echo "  ./ghul-quickcheck.sh 2025-11-29-13-39-sharkoon.json     # Use specific file"
+    echo "  ./ghul-quickcheck.sh results/                            # Use newest from directory"
+    echo
+    echo "Notes:"
+    echo "  - If no argument is provided, quickcheck uses the newest JSON from results/."
+    echo "  - If you pass a filename without '/', quickcheck assumes it is inside 'results/'."
+    echo "  - If you pass a directory, quickcheck will automatically pick the newest JSON inside it."
     exit 1
   fi
-
-  echo "[GHUL] Using result file:"
+  
+  echo "[GHUL] No file specified, using newest JSON from results/:"
   echo "       $RESULT_FILE"
+  echo
+else
+  ARG="$1"
+
+  # Case 1: argument is a directory → pick newest JSON inside it
+  if [[ -d "$ARG" ]]; then
+    # normalize directory (remove trailing slash for ls, but doesn't matter here)
+    dir="$ARG"
+    RESULT_FILE=$(ls -1t "$dir"/*.json 2>/dev/null | head -n1 || true)
+
+    if [[ -z "$RESULT_FILE" ]]; then
+      red "[GHUL] No JSON files found in directory:"
+      echo "       $dir"
+      exit 1
+    fi
+
+    echo "[GHUL] Using newest JSON from directory:"
+    echo "       $RESULT_FILE"
+
+  else
+    # Case 2: argument contains "/" → treat as explicit file path
+    if [[ "$ARG" == */* ]]; then
+      RESULT_FILE="$ARG"
+    else
+      # Case 3: plain filename → assume inside results/
+      RESULT_FILE="results/$ARG"
+    fi
+
+    if [[ ! -f "$RESULT_FILE" ]]; then
+      red "[GHUL] Result file not found:"
+      echo "       $RESULT_FILE"
+      echo
+      echo "Make sure you pass an existing JSON file or a directory containing JSON results."
+      exit 1
+    fi
+
+    echo "[GHUL] Using result file:"
+    echo "       $RESULT_FILE"
+  fi
 fi
 
 

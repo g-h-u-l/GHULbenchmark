@@ -4,6 +4,54 @@
 
 set -euo pipefail
 
+# ---------- Help function (with humor) -----------------------------------------
+show_help() {
+  echo "╔═══════════════════════════════════════════════════════════════╗"
+  echo "║                    GHUL HELLFIRE                              ║"
+  echo "║                    LITTLE HELPER                             ║"
+  echo "╚═══════════════════════════════════════════════════════════════╝"
+  echo
+  echo "Hello! 👋"
+  echo
+  echo "I am 'hellfire-common.sh' – a humble little helper."
+  echo "I handle the administrative tasks for the other Hellfire scripts."
+  echo
+  echo "I should NOT be called directly!"
+  echo "I am just a library with shared functions."
+  echo
+  echo "The other Hellfire scripts need me:"
+  echo "  • ghul-hellfire-cpu.sh    - Extreme CPU Stress Test"
+  echo "  • ghul-hellfire-ram.sh    - Extreme RAM Stress Test"
+  echo "  • ghul-hellfire-gpu.sh    - Extreme GPU Stress Test"
+  echo "  • ghul-hellfire-cooler.sh - Full System Furnace Test"
+  echo
+  echo "Call those scripts directly, not me!"
+  echo
+  echo "I take care of:"
+  echo "  • Sensor monitoring"
+  echo "  • Safety logic (temperature monitoring)"
+  echo "  • Cleanup and process management"
+  echo "  • Evaluation and rating calculation"
+  echo "  • Pretty output and warnings"
+  echo
+  echo "So: Let me work in peace and call the others! 😊"
+  echo
+  exit 0
+}
+
+# Check for help flag (if someone tries to call me directly)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  # Script is being called directly (not sourced)
+  if [[ $# -ge 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    show_help
+  else
+    echo "⚠️  This script should not be called directly!" >&2
+    echo "   It is a library for other Hellfire scripts." >&2
+    echo "   Use -h or --help for more information." >&2
+    exit 1
+  fi
+fi
+
 # Set locale to C to avoid decimal separator issues
 export LC_ALL=C
 

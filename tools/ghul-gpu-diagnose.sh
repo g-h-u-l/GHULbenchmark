@@ -6,6 +6,52 @@ export LANG=C
 export LC_ALL=C
 export LC_NUMERIC=C
 
+# ---------- Help function -----------------------------------------------------
+show_help() {
+  echo "GHUL GPU Diagnostic Tool"
+  echo
+  echo "Usage:"
+  echo "  $0 [OPTIONS]"
+  echo
+  echo "Options:"
+  echo "  -h, --help    Show this help message"
+  echo
+  echo "Description:"
+  echo "  Diagnostic tool for GPU problems (e.g., frozen screens, crashes)."
+  echo "  Continuously monitors GPU sensors (temperature, clocks, power) and"
+  echo "  kernel logs (amdgpu, GPU-related messages)."
+  echo
+  echo "  When a GPU problem occurs, you can:"
+  echo "    • Analyze the logged data to find the issue"
+  echo "    • Send the log files to an AI assistant for help"
+  echo
+  echo "Output:"
+  echo "  Logs are written to: logs/gpu/"
+  echo "    • YYYY-mm-ddTHH-MM-SSZ-gpu-samples.log  (GPU sensor data)"
+  echo "    • YYYY-mm-ddTHH-MM-SSZ-gpu-kernel.log   (Kernel messages)"
+  echo
+  echo "Usage:"
+  echo "  1. Start this tool before the problem occurs:"
+  echo "     $0"
+  echo
+  echo "  2. Reproduce the GPU problem (e.g., run the application that causes"
+  echo "     frozen screens)"
+  echo
+  echo "  3. Press Ctrl+C to stop logging"
+  echo
+  echo "  4. Analyze the log files or send them to an AI assistant"
+  echo
+  echo "Note:"
+  echo "  This tool runs continuously until stopped (Ctrl+C)."
+  echo "  It samples GPU data every 2 seconds and monitors kernel logs in real-time."
+  exit 0
+}
+
+# Check for help flag
+if [[ $# -ge 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
+fi
+
 # === GHUL paths ===
 # Assume this script lives in:  ~/GHULbenchmark/tools/
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

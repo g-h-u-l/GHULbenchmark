@@ -21,8 +21,8 @@ NC=$'\033[0m'
 
 # add bold text properly in bash
 
-bold=$(tput bold)
-normal=$(tput sgr0)
+bold=$(tput bold 2>/dev/null || echo "")
+normal=$(tput sgr0 2>/dev/null || echo "")
 
 ###############################################################################
 # Helper: num_or_zero
@@ -40,6 +40,39 @@ num_or_zero() {
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="${BASE}/results"
 HOST_ID_FILE="${BASE}/.ghul_host_id.json"
+
+###############################################
+# Help function
+###############################################
+show_help() {
+  echo "GHUL Analyze - Compare two benchmark runs"
+  echo
+  echo "Usage:"
+  echo "  ./ghul-analyze.sh [OPTIONS] [old.json new.json]"
+  echo
+  echo "Options:"
+  echo "  -h, --help    Show this help message"
+  echo
+  echo "Arguments:"
+  echo "  (none)              Compare last 2 runs automatically"
+  echo "  old.json new.json   Compare specific files (assumes results/ if no path separator)"
+  echo
+  echo "Examples:"
+  echo "  ./ghul-analyze.sh                                                      # Compare last 2 runs"
+  echo "  ./ghul-analyze.sh 2025-11-29-13-39-sharkoon.json 2025-11-30-10-56-sharkoon.json"
+  echo "  ./ghul-analyze.sh results/old.json results/new.json                    # With full paths"
+  echo
+  echo "Description:"
+  echo "  Compares two GHULbenchmark runs and shows performance differences."
+  echo "  Highlights changes in CPU, RAM, GPU, Network performance and thermals."
+  echo "  Detects RAM upgrades and thermal degradation."
+  exit 0
+}
+
+# Check for help flag
+if [[ $# -ge 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
+fi
 
 # If no arguments: find the last two runs automatically
 if [[ $# -eq 0 ]]; then

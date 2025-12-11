@@ -15,6 +15,41 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=hellfire-common.sh
 source "${SCRIPT_DIR}/hellfire-common.sh"
 
+# ---------- Help function -----------------------------------------------------
+show_help() {
+  echo "GHUL Hellfire - Extreme RAM Stress Test"
+  echo
+  echo "Usage:"
+  echo "  $0 [OPTIONS] [duration_seconds]"
+  echo
+  echo "Options:"
+  echo "  -h, --help    Show this help message"
+  echo
+  echo "Arguments:"
+  echo "  duration_seconds    Test duration in seconds (default: 300, minimum: 10)"
+  echo
+  echo "Examples:"
+  echo "  $0                  # Run for 300 seconds (5 minutes)"
+  echo "  $0 180              # Run for 180 seconds (3 minutes)"
+  echo "  $0 60               # Run for 60 seconds (1 minute)"
+  echo
+  echo "Description:"
+  echo "  Extreme RAM stress test that uses maximum available RAM (90%) with"
+  echo "  various memory access patterns. May cause system slowdown."
+  echo "  Monitors temperatures and triggers safety stops if critical thresholds"
+  echo "  are exceeded."
+  echo
+  echo "WARNING:"
+  echo "  This is NOT a benchmark. This is hardware torture."
+  echo "  System may become unresponsive. Ensure adequate cooling!"
+  exit 0
+}
+
+# Check for help flag
+if [[ $# -ge 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
+fi
+
 # Test configuration
 HELLFIRE_TEST_NAME="ram"
 DEFAULT_DURATION=300  # 5 minutes default
@@ -24,6 +59,7 @@ DURATION="${1:-${DEFAULT_DURATION}}"
 if ! [[ "$DURATION" =~ ^[0-9]+$ ]] || [[ "$DURATION" -lt 10 ]]; then
   red "Error: Duration must be a positive integer (minimum 10 seconds)"
   echo "Usage: $0 [duration_seconds]"
+  echo "Use -h or --help for more information."
   exit 1
 fi
 

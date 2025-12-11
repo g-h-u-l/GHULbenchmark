@@ -38,11 +38,59 @@ have jq || die "jq is required (pacman -S jq)."
 [[ -d "$SENSOR_DIR" ]] || die "logs/sensors/ directory not found at: $SENSOR_DIR"
 
 ###############################################
-# 1) Locate newest benchmark JSON
+# Help function
 ###############################################
-BENCH_FILE="$(ls -1t "${RESULT_DIR}"/*.json 2>/dev/null | head -n1 || true)"
-[[ -n "$BENCH_FILE" ]] || die "No benchmark JSON files found in ${RESULT_DIR}"
-[[ -f "$BENCH_FILE" ]] || die "Benchmark file not found: $BENCH_FILE"
+show_help() {
+  echo "GHUL Report - Detailed sensor data analysis"
+  echo
+  echo "Usage:"
+  echo "  ./ghul-report.sh [OPTIONS] [result.json]"
+  echo
+  echo "Options:"
+  echo "  -h, --help    Show this help message"
+  echo
+  echo "Arguments:"
+  echo "  (none)       Use newest JSON from results/"
+  echo "  result.json  Use specific file (assumes results/ if no path separator)"
+  echo
+  echo "Examples:"
+  echo "  ./ghul-report.sh                                        # Use newest JSON"
+  echo "  ./ghul-report.sh 2025-11-29-13-39-sharkoon.json         # Use specific file"
+  echo "  ./ghul-report.sh results/2025-11-29-13-39-sharkoon.json # With full path"
+  echo
+  echo "Description:"
+  echo "  Analyzes sensor data (temperatures, fan speeds, power) from a benchmark run."
+  echo "  Shows min/max/avg values for CPU, GPU, storage, and case fans."
+  echo "  Includes thermal warnings and segment-based analysis."
+  exit 0
+}
+
+# Check for help flag
+if [[ $# -ge 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
+fi
+
+###############################################
+# 1) Locate benchmark JSON (use argument if provided, otherwise newest)
+###############################################
+if [[ $# -ge 1 ]]; then
+  # Argument provided: use it (with results/ prefix if no path separator)
+  ARG="$1"
+  if [[ "$ARG" == */* ]]; then
+    BENCH_FILE="$ARG"
+  else
+    BENCH_FILE="${RESULT_DIR}/$ARG"
+  fi
+  [[ -f "$BENCH_FILE" ]] || die "Benchmark file not found: $BENCH_FILE"
+else
+  # No argument: use newest JSON from results/
+  BENCH_FILE="$(ls -1t "${RESULT_DIR}"/*.json 2>/dev/null | head -n1 || true)"
+  [[ -n "$BENCH_FILE" ]] || die "No benchmark JSON files found in ${RESULT_DIR}"
+  [[ -f "$BENCH_FILE" ]] || die "Benchmark file not found: $BENCH_FILE"
+  echo "[GHUL] No file specified, using newest JSON from results/:"
+  echo "       $BENCH_FILE"
+  echo
+fi
 
 BENCH_NAME="$(basename "$BENCH_FILE")"
 # Example: 2025-11-29-17-39-sharkoon.json → 2025-11-29-17-39

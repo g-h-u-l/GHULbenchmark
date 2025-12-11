@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.2"
+GHUL_VERSION="0.3"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -29,6 +29,49 @@ export LC_NUMERIC=C
 
 # give me some hint why the crash happened
 trap 'echo "[GHUL] aborted on line $LINENO (exit=$?)" >&2' ERR
+
+# ---------- Help function -----------------------------------------------------
+show_help() {
+  echo "GHULbenchmark - Gaming Hardware Using Linux"
+  echo "Version: ${GHUL_VERSION}"
+  echo
+  echo "Usage:"
+  echo "  ./ghul-benchmark.sh [OPTIONS]"
+  echo
+  echo "Options:"
+  echo "  -h, --help              Show this help message"
+  echo "  --no-update-check       Skip GitHub update check"
+  echo
+  echo "Description:"
+  echo "  Runs a comprehensive hardware benchmark suite for Linux gaming systems."
+  echo "  Tests CPU, RAM, GPU, Storage, and Network performance."
+  echo "  Collects sensor data (temperatures, fan speeds, power) during the run."
+  echo
+  echo "Output:"
+  echo "  Results:  results/YYYY-mm-dd-HH-MM-hostname.json"
+  echo "  Logs:     logs/runs/*.log"
+  echo "  Sensors:  logs/sensors/YYYY-mm-dd-HH-MM-hostname-sensors.jsonl"
+  echo
+  echo "Required Tools (install beforehand):"
+  echo "  - jq, iperf3, mbw, sysbench, glmark2, vkmark, glxinfo (mesa-demos)"
+  echo
+  echo "Installation (Manjaro/Arch):"
+  echo "  sudo pacman -Syu glmark2 sysbench vkmark mesa-demos jq iperf3"
+  echo "  pamac build mbw   # or: yay -S mbw"
+  echo
+  echo "After running:"
+  echo "  ./ghul-quickcheck.sh              # Quick system assessment"
+  echo "  ./ghul-report.sh                  # Detailed sensor analysis"
+  echo "  ./ghul-analyze.sh                 # Compare two runs"
+  echo
+  echo "Project: ${GHUL_REPO_URL}"
+  exit 0
+}
+
+# Check for help flag (before directory check to allow help from anywhere)
+if [[ $# -ge 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
+fi
 
 # Ensure we are run inside the GHULbenchmark directory
 if [[ ! -d "logs" || ! -d "results" ]]; then
@@ -108,6 +151,20 @@ check_for_updates() {
     fi
   fi
 }
+
+# Process command line arguments
+if [[ $# -ge 1 ]]; then
+  case "$1" in
+    --no-update-check)
+      export GHUL_NO_UPDATE_CHECK=1
+      ;;
+    *)
+      echo "[GHUL] Unknown option: $1" >&2
+      echo "Use -h or --help for usage information." >&2
+      exit 1
+      ;;
+  esac
+fi
 
 # Run update check (non-blocking, continues on error)
 check_for_updates || true

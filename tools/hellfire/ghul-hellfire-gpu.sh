@@ -15,6 +15,41 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=hellfire-common.sh
 source "${SCRIPT_DIR}/hellfire-common.sh"
 
+# ---------- Help function -----------------------------------------------------
+show_help() {
+  echo "GHUL Hellfire - Extreme GPU Stress Test"
+  echo
+  echo "Usage:"
+  echo "  $0 [OPTIONS] [duration_seconds]"
+  echo
+  echo "Options:"
+  echo "  -h, --help    Show this help message"
+  echo
+  echo "Arguments:"
+  echo "  duration_seconds    Test duration in seconds (default: 180, minimum: 10)"
+  echo
+  echo "Examples:"
+  echo "  $0                  # Run for 180 seconds (3 minutes)"
+  echo "  $0 300              # Run for 300 seconds (5 minutes)"
+  echo "  $0 60               # Run for 60 seconds (1 minute)"
+  echo
+  echo "Description:"
+  echo "  Extreme GPU stress test using FurMark with MSAA=5 (brute force mode)."
+  echo "  Monitors GPU edge, hotspot, and VRAM temperatures. Triggers safety stops"
+  echo "  if critical thresholds are exceeded (VRAM > 90°C, Hotspot > 100°C)."
+  echo
+  echo "WARNING:"
+  echo "  This is NOT a benchmark. This is hardware torture."
+  echo "  Uses /msaa=5 and unlimited FPS - this is brute force!"
+  echo "  Your GPU will reach maximum temperatures. Ensure adequate cooling!"
+  exit 0
+}
+
+# Check for help flag
+if [[ $# -ge 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
+fi
+
 # Test configuration
 HELLFIRE_TEST_NAME="gpu"
 DEFAULT_DURATION=180  # 3 minutes default
@@ -24,6 +59,7 @@ DURATION="${1:-${DEFAULT_DURATION}}"
 if ! [[ "$DURATION" =~ ^[0-9]+$ ]] || [[ "$DURATION" -lt 10 ]]; then
   red "Error: Duration must be a positive integer (minimum 10 seconds)"
   echo "Usage: $0 [duration_seconds]"
+  echo "Use -h or --help for more information."
   exit 1
 fi
 

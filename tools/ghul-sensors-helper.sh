@@ -10,6 +10,41 @@ export LANG=C
 export LC_ALL=C
 export LC_NUMERIC=C
 
+# ---------- Help function (with humor) -----------------------------------------
+show_help() {
+  echo "╔═══════════════════════════════════════════════════════════════╗"
+  echo "║                    GHUL SENSORS                               ║"
+  echo "║                    LITTLE HELPER                              ║"
+  echo "╚═══════════════════════════════════════════════════════════════╝"
+  echo
+  echo "Hello! 👋"
+  echo
+  echo "I am 'ghul-sensors-helper.sh' – a humble little helper."
+  echo "I monitor the sensors of your machine, so hands off!"
+  echo
+  echo "I should NOT be called directly!"
+  echo "I am used by ghul-benchmark.sh and Hellfire tests to collect sensor data."
+  echo
+  echo "But if you're interested, you can call me with:"
+  echo "  $0 --dump-layout"
+  echo
+  echo "And I will show you the available sensors on your system."
+  echo
+  echo "Available options:"
+  echo "  -h, --help         Show this help message"
+  echo "  --dump-layout      Show all available sensors and their sources"
+  echo
+  echo "Note:"
+  echo "  In normal operation, I run in the background and log sensor data"
+  echo "  to JSONL files in logs/sensors/ during benchmarks and stress tests."
+  exit 0
+}
+
+# Check for help flag
+if [[ $# -ge 1 ]] && [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
+fi
+
 BASE="$(dirname "$(dirname "$0")")"
 HOST="$(hostname)"
 
