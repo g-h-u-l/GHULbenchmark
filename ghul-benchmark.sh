@@ -995,7 +995,6 @@ if have vkmark; then
   # v0.2: Handle NVIDIA vkmark limitation (proprietary driver)
   # Only set to null if the run actually failed (score = 0 AND no scenes found)
   # With newer kernels (6.17+) and Mesa, vkmark can work on NVIDIA
-  local scenes_count
   scenes_count="$(printf '%s' "$SCENES_JSON" | jq 'length' 2>/dev/null || echo 0)"
   
   if [[ "$gpu_vendor" == "nvidia" && "$score" == "0" && "$scenes_count" == "0" ]]; then
