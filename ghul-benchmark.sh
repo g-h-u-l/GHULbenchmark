@@ -90,37 +90,72 @@ check_for_updates() {
     return 0  # No way to check, skip silently
   fi
   
-  # Get latest release tag from GitHub API
+  # Get latest release tag and latest tag from GitHub API
+  # We check both because a newer tag might exist even if a release is present
+  local latest_release_version=""
+  local latest_tag_version=""
   local latest_version=""
   local update_type="unknown"  # "release", "tag", or "main"
   
+  # Get latest release
   if command -v curl >/dev/null 2>&1; then
-    latest_version="$(curl -s "https://api.github.com/repos/${GHUL_REPO}/releases/latest" 2>/dev/null | \
+    latest_release_version="$(curl -s "https://api.github.com/repos/${GHUL_REPO}/releases/latest" 2>/dev/null | \
       grep -o '"tag_name": "[^"]*' | cut -d'"' -f4 | sed 's/^v//' || echo "")"
   elif command -v wget >/dev/null 2>&1; then
-    latest_version="$(wget -qO- "https://api.github.com/repos/${GHUL_REPO}/releases/latest" 2>/dev/null | \
+    latest_release_version="$(wget -qO- "https://api.github.com/repos/${GHUL_REPO}/releases/latest" 2>/dev/null | \
       grep -o '"tag_name": "[^"]*' | cut -d'"' -f4 | sed 's/^v//' || echo "")"
   fi
   
-  # Mark as release if found
-  if [[ -n "$latest_version" ]]; then
-    update_type="release"
+  # Get latest tag (always check, even if release exists)
+  if command -v curl >/dev/null 2>&1; then
+    latest_tag_version="$(curl -s "https://api.github.com/repos/${GHUL_REPO}/tags" 2>/dev/null | \
+      grep -o '"name": "v[^"]*' | head -1 | cut -d'"' -f4 | sed 's/^v//' || echo "")"
+  elif command -v wget >/dev/null 2>&1; then
+    latest_tag_version="$(wget -qO- "https://api.github.com/repos/${GHUL_REPO}/tags" 2>/dev/null | \
+      grep -o '"name": "v[^"]*' | head -1 | cut -d'"' -f4 | sed 's/^v//' || echo "")"
   fi
   
-  # If no release found, try to get latest tag from GitHub Tags API (fallback 1)
-  if [[ -z "$latest_version" ]]; then
-    if command -v curl >/dev/null 2>&1; then
-      latest_version="$(curl -s "https://api.github.com/repos/${GHUL_REPO}/tags" 2>/dev/null | \
-        grep -o '"name": "v[^"]*' | head -1 | cut -d'"' -f4 | sed 's/^v//' || echo "")"
-    elif command -v wget >/dev/null 2>&1; then
-      latest_version="$(wget -qO- "https://api.github.com/repos/${GHUL_REPO}/tags" 2>/dev/null | \
-        grep -o '"name": "v[^"]*' | head -1 | cut -d'"' -f4 | sed 's/^v//' || echo "")"
-    fi
+  # Compare versions and pick the newest one
+  # Helper function to compare versions (returns 1 if v1 > v2, 0 otherwise)
+  version_gt() {
+    local v1="$1"
+    local v2="$2"
+    if [[ -z "$v1" ]]; then return 1; fi
+    if [[ -z "$v2" ]]; then return 0; fi
     
-    # Mark as tag if found
-    if [[ -n "$latest_version" ]]; then
-      update_type="tag"
+    local v1_major v1_minor v1_patch v2_major v2_minor v2_patch
+    IFS='.' read -r v1_major v1_minor v1_patch <<< "${v1}.0"
+    IFS='.' read -r v2_major v2_minor v2_patch <<< "${v2}.0"
+    [[ -z "$v1_patch" ]] && v1_patch=0
+    [[ -z "$v2_patch" ]] && v2_patch=0
+    
+    if [[ "$v1_major" -gt "$v2_major" ]] || \
+       ([[ "$v1_major" -eq "$v2_major" ]] && [[ "$v1_minor" -gt "$v2_minor" ]]) || \
+       ([[ "$v1_major" -eq "$v2_major" ]] && [[ "$v1_minor" -eq "$v2_minor" ]] && [[ "$v1_patch" -gt "$v2_patch" ]]); then
+      return 0
+    else
+      return 1
     fi
+  }
+  
+  # Determine which version is newer and set update_type accordingly
+  if [[ -n "$latest_release_version" ]] && [[ -n "$latest_tag_version" ]]; then
+    # Both exist: pick the newer one
+    if version_gt "$latest_tag_version" "$latest_release_version"; then
+      latest_version="$latest_tag_version"
+      update_type="tag"
+    else
+      latest_version="$latest_release_version"
+      update_type="release"
+    fi
+  elif [[ -n "$latest_release_version" ]]; then
+    # Only release exists
+    latest_version="$latest_release_version"
+    update_type="release"
+  elif [[ -n "$latest_tag_version" ]]; then
+    # Only tag exists
+    latest_version="$latest_tag_version"
+    update_type="tag"
   fi
   
   # If still no version found, try to get version from main branch (fallback 2)
