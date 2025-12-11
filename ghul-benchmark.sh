@@ -116,12 +116,12 @@ check_for_updates() {
   fi
   
   # Compare versions and pick the newest one
-  # Helper function to compare versions (returns 1 if v1 > v2, 0 otherwise)
+  # Helper function to compare versions (returns 0 if v1 > v2, 1 otherwise)
   version_gt() {
     local v1="$1"
     local v2="$2"
     if [[ -z "$v1" ]]; then return 1; fi
-    if [[ -z "$v2" ]]; then return 0; fi
+    if [[ -z "$v2" ]]; then return 1; fi
     
     local v1_major v1_minor v1_patch v2_major v2_minor v2_patch
     IFS='.' read -r v1_major v1_minor v1_patch <<< "${v1}.0"
@@ -176,6 +176,12 @@ check_for_updates() {
   
   # Compare versions (semantic versioning comparison)
   # Only show update message if latest_version is actually newer than current
+  # Debug: show what we found
+  if [[ -n "${GHUL_DEBUG_UPDATE:-}" ]]; then
+    echo "[DEBUG] Current: $GHUL_VERSION, Latest: $latest_version, Type: $update_type" >&2
+    echo "[DEBUG] Release version: $latest_release_version, Tag version: $latest_tag_version" >&2
+  fi
+  
   if [[ -n "$latest_version" && "$latest_version" != "$GHUL_VERSION" ]]; then
     # Simple version comparison: split by dots and compare numerically
     # Handle versions like "0.2", "0.3", "0.3.1", etc.
