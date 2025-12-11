@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.3"
+GHUL_VERSION="0.3.1"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -92,12 +92,19 @@ check_for_updates() {
   
   # Get latest release tag from GitHub API
   local latest_version=""
+  local update_type="unknown"  # "release", "tag", or "main"
+  
   if command -v curl >/dev/null 2>&1; then
     latest_version="$(curl -s "https://api.github.com/repos/${GHUL_REPO}/releases/latest" 2>/dev/null | \
       grep -o '"tag_name": "[^"]*' | cut -d'"' -f4 | sed 's/^v//' || echo "")"
   elif command -v wget >/dev/null 2>&1; then
     latest_version="$(wget -qO- "https://api.github.com/repos/${GHUL_REPO}/releases/latest" 2>/dev/null | \
       grep -o '"tag_name": "[^"]*' | cut -d'"' -f4 | sed 's/^v//' || echo "")"
+  fi
+  
+  # Mark as release if found
+  if [[ -n "$latest_version" ]]; then
+    update_type="release"
   fi
   
   # If no release found, try to get latest tag from GitHub Tags API (fallback 1)
@@ -109,6 +116,11 @@ check_for_updates() {
       latest_version="$(wget -qO- "https://api.github.com/repos/${GHUL_REPO}/tags" 2>/dev/null | \
         grep -o '"name": "v[^"]*' | head -1 | cut -d'"' -f4 | sed 's/^v//' || echo "")"
     fi
+    
+    # Mark as tag if found
+    if [[ -n "$latest_version" ]]; then
+      update_type="tag"
+    fi
   fi
   
   # If still no version found, try to get version from main branch (fallback 2)
@@ -119,6 +131,11 @@ check_for_updates() {
     elif command -v wget >/dev/null 2>&1; then
       latest_version="$(wget -qO- "https://raw.githubusercontent.com/${GHUL_REPO}/main/ghul-benchmark.sh" 2>/dev/null | \
         grep -m1 '^GHUL_VERSION=' | sed -n 's/.*GHUL_VERSION="\([^"]*\)".*/\1/p' || echo "")"
+    fi
+    
+    # Mark as main branch if found
+    if [[ -n "$latest_version" ]]; then
+      update_type="main"
     fi
   fi
   
@@ -146,7 +163,24 @@ check_for_updates() {
     if [[ $is_newer -eq 1 ]]; then
       echo ""
       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-      echo "  ⚠  GHUL Update Available!"
+      
+      # Different messages based on update type
+      if [[ "$update_type" == "release" ]]; then
+        echo "  ⚠  GHUL Update Available (Release with new features)!"
+        echo ""
+        echo "  This is a major release with new features and improvements."
+        echo "  Updating is recommended."
+      elif [[ "$update_type" == "tag" ]]; then
+        echo "  ⚠  GHUL Update Available (Tag - bugfixes only)!"
+        echo ""
+        echo "  This is a patch release with bugfixes only."
+        echo "  Updating is optional but recommended."
+      else
+        echo "  ⚠  GHUL Update Available!"
+        echo ""
+        echo "  A newer version is available on the main branch."
+      fi
+      
       echo ""
       echo "  Current version: ${GHUL_VERSION}"
       echo "  Latest version:   ${latest_version}"
@@ -155,7 +189,13 @@ check_for_updates() {
       echo "    cd $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
       echo "    git pull origin main"
       echo ""
-      echo "  Or visit: ${GHUL_REPO_URL}/releases"
+      if [[ "$update_type" == "release" ]]; then
+        echo "  Or visit: ${GHUL_REPO_URL}/releases"
+      elif [[ "$update_type" == "tag" ]]; then
+        echo "  Or visit: ${GHUL_REPO_URL}/tags"
+      else
+        echo "  Or visit: ${GHUL_REPO_URL}"
+      fi
       echo ""
       read -p "  Continue with benchmark anyway? [Y/n] " -n 1 -r
       echo
