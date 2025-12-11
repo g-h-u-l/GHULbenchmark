@@ -123,15 +123,31 @@ check_for_updates() {
     if [[ -z "$v1" ]]; then return 1; fi
     if [[ -z "$v2" ]]; then return 1; fi
     
-    local v1_major v1_minor v1_patch v2_major v2_minor v2_patch
-    IFS='.' read -r v1_major v1_minor v1_patch <<< "${v1}.0"
-    IFS='.' read -r v2_major v2_minor v2_patch <<< "${v2}.0"
-    [[ -z "$v1_patch" ]] && v1_patch=0
-    [[ -z "$v2_patch" ]] && v2_patch=0
+    # Normalize versions: ensure we have major.minor.patch format
+    local v1_normalized="${v1}.0.0"
+    local v2_normalized="${v2}.0.0"
     
-    if [[ "$v1_major" -gt "$v2_major" ]] || \
-       ([[ "$v1_major" -eq "$v2_major" ]] && [[ "$v1_minor" -gt "$v2_minor" ]]) || \
-       ([[ "$v1_major" -eq "$v2_major" ]] && [[ "$v1_minor" -eq "$v2_minor" ]] && [[ "$v1_patch" -gt "$v2_patch" ]]); then
+    # Extract components (take only first 3 parts)
+    local v1_major v1_minor v1_patch v2_major v2_minor v2_patch
+    IFS='.' read -r v1_major v1_minor v1_patch _ <<< "$v1_normalized"
+    IFS='.' read -r v2_major v2_minor v2_patch _ <<< "$v2_normalized"
+    
+    # Ensure patch is numeric (default to 0 if empty)
+    v1_patch="${v1_patch:-0}"
+    v2_patch="${v2_patch:-0}"
+    
+    # Convert to integers for comparison (strip any non-numeric)
+    v1_major=$((v1_major + 0))
+    v1_minor=$((v1_minor + 0))
+    v1_patch=$((v1_patch + 0))
+    v2_major=$((v2_major + 0))
+    v2_minor=$((v2_minor + 0))
+    v2_patch=$((v2_patch + 0))
+    
+    # Compare: return 0 (true) if v1 > v2
+    if [[ $v1_major -gt $v2_major ]] || \
+       ([[ $v1_major -eq $v2_major ]] && [[ $v1_minor -gt $v2_minor ]]) || \
+       ([[ $v1_major -eq $v2_major ]] && [[ $v1_minor -eq $v2_minor ]] && [[ $v1_patch -gt $v2_patch ]]); then
       return 0
     else
       return 1
@@ -185,19 +201,30 @@ check_for_updates() {
   if [[ -n "$latest_version" && "$latest_version" != "$GHUL_VERSION" ]]; then
     # Simple version comparison: split by dots and compare numerically
     # Handle versions like "0.2", "0.3", "0.3.1", etc.
-    local current_major current_minor current_patch latest_major latest_minor latest_patch
-    IFS='.' read -r current_major current_minor current_patch <<< "${GHUL_VERSION}.0"
-    IFS='.' read -r latest_major latest_minor latest_patch <<< "${latest_version}.0"
+    local current_normalized="${GHUL_VERSION}.0.0"
+    local latest_normalized="${latest_version}.0.0"
     
-    # Normalize patch version (default to 0 if empty)
-    [[ -z "$current_patch" ]] && current_patch=0
-    [[ -z "$latest_patch" ]] && latest_patch=0
+    local current_major current_minor current_patch latest_major latest_minor latest_patch
+    IFS='.' read -r current_major current_minor current_patch _ <<< "$current_normalized"
+    IFS='.' read -r latest_major latest_minor latest_patch _ <<< "$latest_normalized"
+    
+    # Ensure patch is numeric (default to 0 if empty)
+    current_patch="${current_patch:-0}"
+    latest_patch="${latest_patch:-0}"
+    
+    # Convert to integers for comparison
+    current_major=$((current_major + 0))
+    current_minor=$((current_minor + 0))
+    current_patch=$((current_patch + 0))
+    latest_major=$((latest_major + 0))
+    latest_minor=$((latest_minor + 0))
+    latest_patch=$((latest_patch + 0))
     
     # Check if latest version is actually newer
     local is_newer=0
-    if [[ "$latest_major" -gt "$current_major" ]] || \
-       ([[ "$latest_major" -eq "$current_major" ]] && [[ "$latest_minor" -gt "$current_minor" ]]) || \
-       ([[ "$latest_major" -eq "$current_major" ]] && [[ "$latest_minor" -eq "$current_minor" ]] && [[ "$latest_patch" -gt "$current_patch" ]]); then
+    if [[ $latest_major -gt $current_major ]] || \
+       ([[ $latest_major -eq $current_major ]] && [[ $latest_minor -gt $current_minor ]]) || \
+       ([[ $latest_major -eq $current_major ]] && [[ $latest_minor -eq $current_minor ]] && [[ $latest_patch -gt $current_patch ]]); then
       is_newer=1
     fi
     
