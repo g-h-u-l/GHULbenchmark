@@ -18,6 +18,8 @@ GHUL provides:
 - **Gaming suitability assessment** for your hardware
 - **Sensor data logging** during benchmarks
 - **JSON-based results** for easy analysis and integration
+- **Upload & sharing** (beta, IP whitelist) - upload results to shared.ghul.run
+- **Hellfire stress tests** - extreme hardware torture tests (CPU, RAM, GPU, Cooler)
 
 ## Project Structure
 
@@ -54,11 +56,16 @@ sudo apt install git
 
 # 2. Clone repository
 cd ~/
-git clone https://github.com/g-h-u-l/GHULbenchmark.git .
+git clone https://github.com/g-h-u-l/GHULbenchmark.git
 cd GHULbenchmark
 
-# 3. Make scripts executable (usually not needed, but safe to do)
-chmod +x *.sh tools/*.sh
+# 3. Install dependencies (recommended)
+sudo ./firstinstall.sh
+
+# Or manually:
+sudo pacman -S glmark2 vkmark sysbench mbw stress-ng p7zip mesa-demos jq iperf3 speedtest-cli gamescope lm_sensors
+# For mbw (if not in repos):
+pamac build mbw   # or: yay -S mbw
 ```
 
 **Important:** All GHUL scripts must be run from within the `GHULbenchmark` directory. The scripts automatically detect their location and use relative paths for all operations.
@@ -93,7 +100,23 @@ sudo ./firstrun.sh
 ### 2. Run Benchmark
 
 ```bash
+# Standard benchmark
 ./ghul-benchmark.sh
+
+# With upload (beta, IP whitelist - see below)
+./ghul-benchmark.sh --share
+
+# With Hellfire stress tests
+./ghul-benchmark.sh --hellfire
+
+# Hellfire in wimp mode (60s per test, reduced intensity)
+./ghul-benchmark.sh --hellfire --wimp
+
+# Hellfire in insane mode (maximum intensity, 4K GPU)
+./ghul-benchmark.sh --hellfire --insane
+
+# Full workflow: benchmark + hellfire + upload
+./ghul-benchmark.sh --share --hellfire --wimp
 ```
 
 **What is tested:**
@@ -203,6 +226,36 @@ Each benchmark result contains:
 - **timeline**: Timestamps for each benchmark phase
 - **run_meta**: Start/end timestamps, duration
 
+## Version 0.4.0
+
+This version includes all features from v0.2 plus:
+
+### Upload & Sharing System (Beta)
+- ✅ **Session-based upload API** (`--share` flag)
+  - Upload benchmark results and sensor data to shared.ghul.run
+  - Session tracking with step-by-step progress monitoring
+  - Anti-cheat validation (timestamp checks, step order validation)
+  - File signing with Ed25519/RSA keys for authenticity
+  - **Status**: Currently in beta, IP whitelist active, frontend pending (v0.5.0)
+
+### Hellfire Stress Tests
+- ✅ **Extreme hardware stress testing** (`--hellfire` flag)
+  - CPU, RAM, GPU, and full-system cooler tests
+  - Automatic sensor monitoring during stress tests
+  - Thermal safety monitoring with automatic abort on critical temperatures
+  - Three intensity modes:
+    - **Default**: 300s CPU/RAM, 180s GPU/Cooler
+    - **Wimp mode** (`--wimp`): 60s per test, GPU MSAA=2 (reduced intensity)
+    - **Insane mode** (`--insane`): 600s per test, 4K GPU resolution, minimal cooldown
+- ✅ **Cooldown system** - Automatic cooldown phases between tests (skipped in insane mode)
+
+### Technical Improvements
+- ✅ Python 3.13 compatibility (replaced deprecated `cgi` module)
+- ✅ Unified timestamp system (all files use benchmark timestamp)
+- ✅ Improved error handling and user feedback
+
+**See [RELEASE_v0.4.0.md](RELEASE_v0.4.0.md) for full details.**
+
 ## Version 0.2
 
 This version includes all features from v0.1 plus:
@@ -250,8 +303,7 @@ This version focused on:
 
 **Not included (future versions):**
 - Database integration (`db/` is planned for later)
-- Community upload functionality
-- Web interface
+- Web interface for viewing shared results (planned for v0.5.0)
 
 ## Tools
 
