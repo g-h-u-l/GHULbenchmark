@@ -102,7 +102,12 @@ have() {
 }
 
 get_timestamp() {
-  date +"%Y-%m-%d-%H-%M-%S"
+  # Use benchmark timestamp if provided (via GHUL_RUN_TS), otherwise generate new one
+  if [[ -n "${GHUL_RUN_TS:-}" ]]; then
+    echo "${GHUL_RUN_TS}"
+  else
+    date +"%Y-%m-%d-%H-%M-%S"
+  fi
 }
 
 # ============================================================================

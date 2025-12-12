@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.3.2"
+GHUL_VERSION="0.4.0"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -41,6 +41,11 @@ show_help() {
   echo "Options:"
   echo "  -h, --help              Show this help message"
   echo "  --no-update-check       Skip GitHub update check"
+  echo "  --share                 Upload results to shared.ghul.run after benchmark"
+  echo "  --hellfire              Run extreme stress tests after benchmark (CPU, RAM, GPU, Cooler)"
+  echo "  --insane                Hellfire with maximum settings (longer duration, 4K GPU, minimal cooldown)"
+  echo "                          WARNING: Only for systems with extreme cooling (LN2, etc.)!"
+  echo "  --wimp                  Hellfire in wimp mode (60s per test, GPU MSAA=2 instead of 5)"
   echo
   echo "Description:"
   echo "  Runs a comprehensive hardware benchmark suite for Linux gaming systems."
@@ -56,6 +61,9 @@ show_help() {
   echo "  - jq, iperf3, mbw, sysbench, glmark2, vkmark, glxinfo (mesa-demos)"
   echo
   echo "Installation (Manjaro/Arch):"
+  echo "  sudo ./firstinstall.sh   # Automatic installation (recommended)"
+  echo ""
+  echo "  Or manually:"
   echo "  sudo pacman -Syu glmark2 sysbench vkmark mesa-demos jq iperf3"
   echo "  pamac build mbw   # or: yay -S mbw"
   echo
@@ -278,10 +286,32 @@ check_for_updates() {
 }
 
 # Process command line arguments
-if [[ $# -ge 1 ]]; then
+GHUL_SHARE=0
+GHUL_HELLFIRE=0
+GHUL_INSANE=0
+while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-update-check)
       export GHUL_NO_UPDATE_CHECK=1
+      shift
+      ;;
+    --share)
+      GHUL_SHARE=1
+      shift
+      ;;
+    --hellfire)
+      GHUL_HELLFIRE=1
+      shift
+      ;;
+    --insane)
+      GHUL_INSANE=1
+      GHUL_HELLFIRE=1  # insane implies hellfire
+      shift
+      ;;
+    --wimp)
+      GHUL_WIMP=1
+      GHUL_HELLFIRE=1  # wimp implies hellfire
+      shift
       ;;
     *)
       echo "[GHUL] Unknown option: $1" >&2
@@ -289,7 +319,7 @@ if [[ $# -ge 1 ]]; then
       exit 1
       ;;
   esac
-fi
+done
 
 # Run update check (non-blocking, continues on error)
 check_for_updates || true
@@ -306,6 +336,88 @@ mkdir -p "${OUTDIR}" "${LOGDIR}" "${SENSORSDIR}"
 TS="$(date +%Y-%m-%d-%H-%M)"
 HOST="$(hostname)"
 OUTFILE="${OUTDIR}/${TS}-${HOST}.json"
+
+# --------- Hellfire confirmation (if --hellfire flag was set) -----------------
+if [[ "${GHUL_HELLFIRE:-0}" -eq 1 ]]; then
+  echo ""
+  printf '\033[41;97;1m%s\033[0m\n' "======================================================================"
+  printf '\033[41;97;1m%s\033[0m\n' "   ⚠️  GHUL HELLFIRE – EXTREME HARDWARE TORTURE MODE ACTIVATED ⚠️       "
+  printf '\033[41;97;1m%s\033[0m\n' "======================================================================"
+  echo ""
+  echo "You have requested Hellfire stress tests after the benchmark."
+  echo ""
+  echo "This is NOT a benchmark. This is NOT a stress test."
+  echo "This is a *hardware torture procedure* designed to push your CPU / GPU / RAM / PSU"
+  echo "far beyond any real-world workload."
+  echo ""
+  echo "Heat levels will reach extreme values."
+  echo "Your room will heat up."
+  echo "Your fans will scream."
+  echo "Your PSU will beg for mercy."
+  echo ""
+  printf '\033[41;97;1m%s\033[0m\n' "Warning: the name says it all."
+  echo ""
+  echo "If cooling, power delivery, thermal paste, mounting pressure or airflow are"
+  echo "inadequate, permanent hardware damage is possible."
+  echo ""
+  if [[ "${GHUL_WIMP:-0}" -eq 1 ]]; then
+    printf '\033[33;1m%s\033[0m\n' "🐣 WIMP MODE: Reduced settings enabled!"
+    printf '\033[33;1m%s\033[0m\n' "   60 seconds per test, GPU MSAA=2 (instead of 5)."
+    printf '\033[33;1m%s\033[0m\n' "   For those who want to test without the full torture."
+    echo ""
+  elif [[ "${GHUL_INSANE:-0}" -eq 1 ]]; then
+    printf '\033[33;1m%s\033[0m\n' "⚠️  INSANE MODE: Maximum settings enabled!"
+    printf '\033[33;1m%s\033[0m\n' "   Extended durations, 4K GPU resolution, minimal cooldown."
+    printf '\033[33;1m%s\033[0m\n' "   Only for systems with extreme cooling (LN2, custom loops, etc.)!"
+    echo ""
+  fi
+  printf '\033[97;41;1m%s\033[0m\n' "To continue with benchmark + Hellfire tests, type YES exactly. Anything else aborts."
+  echo ""
+  echo -n "> "
+  read -r hellfire_answer
+  
+  if [[ "$hellfire_answer" != "YES" ]]; then
+    echo ""
+    echo "Aborted."
+    echo ""
+    echo "Wise decision, traveler."
+    echo ""
+    exit 0
+  fi
+  
+  echo ""
+  echo "🔥 You have been warned."
+  echo ""
+  echo "Proceeding with benchmark, then Hellfire stress tests…"
+  echo ""
+  echo "Good luck, brave warrior."
+  echo ""
+  echo "🔥🔥🔥"
+  echo ""
+fi
+
+# Initialize share upload session if --share flag is set
+if [[ "${GHUL_SHARE:-0}" -eq 1 ]]; then
+  SHARE_SCRIPT="${BASE}/tools/ghul-share-upload.sh"
+  if [[ -f "$SHARE_SCRIPT" ]]; then
+    source "$SHARE_SCRIPT"
+    export GHUL_BASE="$BASE"
+    export GHUL_HELLFIRE="${GHUL_HELLFIRE:-0}"
+    export GHUL_INSANE="${GHUL_INSANE:-0}"
+    ghul_init_share_session "$TS" "$HOST"
+    init_result=$?
+    if [[ $init_result -eq 2 ]]; then
+      # Access denied - abort
+      exit 1
+    elif [[ $init_result -ne 0 ]]; then
+      echo "[GHUL] Warning: Share upload initialization failed, continuing without upload" >&2
+      GHUL_SHARE=0
+    fi
+  else
+    echo "[GHUL] Warning: Share upload script not found, continuing without upload" >&2
+    GHUL_SHARE=0
+  fi
+fi
 
 echo "== GHUL Benchmark (${HOST} @ ${TS}) =="
 
@@ -326,6 +438,36 @@ fi
 
 # --------- helpers --------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }          # true if command exists
+
+# ---------- Cooldown function with countdown -------------------------------------
+ghul_cooldown() {
+  local duration="$1"
+  local reason="${2:-Cooldown}"
+  
+  # Skip cooldown in insane mode
+  if [[ "${GHUL_INSANE:-0}" -eq 1 ]]; then
+    echo ""
+    echo "[GHUL] ⚠️  INSANE MODE: You requested insane, you get insane. No cooldown."
+    echo ""
+    return 0
+  fi
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "[GHUL] ${reason}"
+  echo "[GHUL] Cooldown: ${duration} seconds"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  
+  local remaining="$duration"
+  while [[ $remaining -gt 0 ]]; do
+    printf "\r[GHUL] Cooldown: %3d seconds remaining..." "$remaining"
+    sleep 1
+    remaining=$((remaining - 1))
+  done
+  printf "\r[GHUL] Cooldown complete. Continuing...                              \n"
+  echo ""
+}
 cap()  { "$@" 2>/dev/null || true; }                 # run command, never fail
 
 # JSON accumulator
@@ -737,6 +879,11 @@ RAM_JSON="$(printf '%s' "$RAM_JSON" | jq '
 # Add to master JSON
 add_obj "ram" "$RAM_JSON"
 
+# Notify share upload that RAM phase completed
+if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+  ghul_notify_step "ram" "$(date +%s)"
+fi
+
 # --------- Storage tests -------------------------------------------------------
 mark_event "storage_start"
 echo "-- Storage tests..."
@@ -871,6 +1018,11 @@ fi
 
 add_obj "storage" "$STORAGE_JSON"
 
+# Notify share upload that Storage phase completed
+if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+  ghul_notify_step "storage" "$(date +%s)"
+fi
+
 # --------- CPU tests -----------------------------------------------------------
 mark_event "cpu_start"
 echo "-- CPU tests..."
@@ -949,6 +1101,11 @@ fi
 
 # Attach CPU section to global JSON
 add_obj "cpu" "$CPU_JSON"
+
+# Notify share upload that CPU phase completed
+if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+  ghul_notify_step "cpu" "$(date +%s)"
+fi
 
 
 # --------- Network (loopback TCP/UDP) ------------------------------------------
@@ -1261,6 +1418,15 @@ fi
 
 add_obj "gpu" "$GPU_JSON"
 
+# Notify share upload that GPU phase completed
+if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+  ghul_notify_step "gpu" "$(date +%s)"
+  # Skip cooler step (not run in benchmark-only mode, but API expects it)
+  ghul_notify_step "cooler" "$(date +%s)"
+  # Final step before upload
+  ghul_notify_step "benchmark" "$(date +%s)"
+fi
+
 # --------- run timing metadata (for sensor correlation) ------------------------
 
 RUN_END_EPOCH="$(date +%s)"
@@ -1322,3 +1488,181 @@ if [[ -f "$SENSORS_FILE" ]]; then
 fi
 echo ""
 echo "[GHUL] To see thermals: ./ghul-report.sh $OUTFILE"
+
+# --------- Share upload (if --share flag was set) ----------------------------
+if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+  # Upload files (session already initialized and steps already sent)
+  ghul_upload_results "$OUTFILE" "$SENSORS_FILE"
+  
+  # Only finalize if no Hellfire tests are planned
+  if [[ "${GHUL_HELLFIRE:-0}" -ne 1 ]]; then
+    echo "[GHUL] Finalizing session..."
+    api_finalize "${GHUL_SESSION_ID}" || {
+      echo "[GHUL] Warning: Failed to finalize session" >&2
+    }
+    echo "[GHUL] Share upload complete!"
+    echo ""
+  fi
+fi
+
+# --------- Cooldown before Hellfire (if --hellfire flag was set) --------------
+if [[ "${GHUL_HELLFIRE:-0}" -eq 1 ]]; then
+  ghul_cooldown 180 "Preparing for Hellfire stress tests..."
+fi
+
+# --------- Hellfire stress tests (if --hellfire flag was set) -----------------
+if [[ "${GHUL_HELLFIRE:-0}" -eq 1 ]]; then
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "[GHUL] Starting Hellfire stress tests..."
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  
+  HELLFIRE_DIR="${BASE}/tools/hellfire"
+  
+  # Determine durations based on --insane or --wimp flag
+  if [[ "${GHUL_WIMP:-0}" -eq 1 ]]; then
+    CPU_DURATION=60
+    RAM_DURATION=60
+    GPU_DURATION=60
+    COOLER_DURATION=60
+    GPU_RESOLUTION="1920x1080"
+    GPU_MSAA=2
+    echo "[GHUL] 🐣 WIMP MODE: Reduced settings (60s per test, GPU MSAA=2)"
+    echo ""
+  elif [[ "${GHUL_INSANE:-0}" -eq 1 ]]; then
+    CPU_DURATION=600
+    RAM_DURATION=600
+    GPU_DURATION=600
+    COOLER_DURATION=300
+    GPU_RESOLUTION="3840x2160"  # 4K
+    GPU_MSAA=5
+    echo "[GHUL] ⚠️  INSANE MODE: Maximum settings enabled!"
+    echo "[GHUL]    CPU: ${CPU_DURATION}s, RAM: ${RAM_DURATION}s, GPU: ${GPU_DURATION}s @ ${GPU_RESOLUTION}"
+    echo "[GHUL]    Only for systems with extreme cooling (LN2, etc.)!"
+    echo ""
+  else
+    CPU_DURATION=300
+    RAM_DURATION=300
+    GPU_DURATION=180
+    COOLER_DURATION=180
+    GPU_RESOLUTION="1920x1080"
+    GPU_MSAA=5
+  fi
+  
+  # Export flags for Hellfire scripts
+  export GHUL_INSANE_MODE="${GHUL_INSANE:-0}"
+  export GHUL_WIMP_MODE="${GHUL_WIMP:-0}"
+  export GHUL_GPU_RESOLUTION="$GPU_RESOLUTION"
+  export GHUL_GPU_MSAA="${GPU_MSAA:-5}"
+  
+  # Run Hellfire tests in sequence (automatically confirm with YES)
+  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-cpu.sh" ]]; then
+    echo "[GHUL] Running CPU Hellfire test (${CPU_DURATION}s)..."
+    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-cpu.sh" "$CPU_DURATION" || {
+      echo "[GHUL] Warning: CPU Hellfire test failed or aborted" >&2
+    }
+    # Notify API that CPU Hellfire test completed
+    if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+      ghul_notify_step "hellfire_cpu" "$(date +%s)"
+    fi
+    echo ""
+  fi
+  
+  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-ram.sh" ]]; then
+    echo "[GHUL] Running RAM Hellfire test (${RAM_DURATION}s)..."
+    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-ram.sh" "$RAM_DURATION" || {
+      echo "[GHUL] Warning: RAM Hellfire test failed or aborted" >&2
+    }
+    # Notify API that RAM Hellfire test completed
+    if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+      ghul_notify_step "hellfire_ram" "$(date +%s)"
+    fi
+    echo ""
+  fi
+  
+  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-gpu.sh" ]]; then
+    echo "[GHUL] Running GPU Hellfire test (${GPU_DURATION}s @ ${GPU_RESOLUTION})..."
+    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-gpu.sh" "$GPU_DURATION" || {
+      echo "[GHUL] Warning: GPU Hellfire test failed or aborted" >&2
+    }
+    # Notify API that GPU Hellfire test completed
+    if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+      ghul_notify_step "hellfire_gpu" "$(date +%s)"
+    fi
+    echo ""
+  fi
+  
+  # Cooldown between GPU and Cooler test
+  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-cooler.sh" ]]; then
+    ghul_cooldown 300 "Preparing for Cooler Hellfire test (full system furnace)..."
+  fi
+  
+  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-cooler.sh" ]]; then
+    echo "[GHUL] Running Cooler Hellfire test (${COOLER_DURATION}s)..."
+    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-cooler.sh" "$COOLER_DURATION" || {
+      echo "[GHUL] Warning: Cooler Hellfire test failed or aborted" >&2
+    }
+    # Notify API that Cooler Hellfire test completed
+    if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+      ghul_notify_step "hellfire_cooler" "$(date +%s)"
+    fi
+    echo ""
+  fi
+  
+  # Upload Hellfire results if --share is set
+  if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+    echo "[GHUL] Uploading Hellfire results..."
+    HELLFIRE_LOGDIR="${BASE}/logs/hellfire"
+    HELLFIRE_PREFIX="${TS}-${HOST}"
+    
+    # Determine hellfire mode for filename suffix
+    hellfire_mode="default"
+    if [[ "${GHUL_WIMP:-0}" -eq 1 ]]; then
+      hellfire_mode="wimp"
+    elif [[ "${GHUL_INSANE:-0}" -eq 1 ]]; then
+      hellfire_mode="insane"
+    fi
+    
+    # Find and upload Hellfire sensor logs (with mode in filename)
+    for test_name in cpu ram gpu cooler; do
+      sensor_file="${HELLFIRE_LOGDIR}/${HELLFIRE_PREFIX}-${test_name}-sensors.jsonl"
+      if [[ -f "$sensor_file" ]]; then
+        # Create temporary file with mode in filename
+        temp_file="$(mktemp)"
+        new_filename="${TS}-${HOST}-hellfire-${hellfire_mode}-${test_name}-sensors.jsonl"
+        temp_path="$(dirname "$temp_file")/${new_filename}"
+        cp "$sensor_file" "$temp_path"
+        
+        echo "[GHUL] Uploading ${test_name} Hellfire sensor data (mode: ${hellfire_mode})..."
+        if ghul_upload_hellfire_file "$temp_path"; then
+          echo "[GHUL] Uploaded: ${test_name} Hellfire data"
+        else
+          echo "[GHUL] Warning: Failed to upload ${test_name} Hellfire data" >&2
+        fi
+        
+        # Clean up temp file
+        rm -f "$temp_path"
+      else
+        echo "[GHUL] Warning: Hellfire sensor file not found: ${sensor_file}" >&2
+      fi
+    done
+    echo ""
+    
+    echo "[GHUL] Hellfire stress tests complete!"
+    echo ""
+    
+    # Finalize session after all uploads (benchmark + hellfire)
+    echo "[GHUL] Finalizing session..."
+    if api_finalize "${GHUL_SESSION_ID}"; then
+      echo "[GHUL] Session finalized successfully"
+    else
+      echo "[GHUL] Warning: Failed to finalize session" >&2
+    fi
+    echo ""
+  else
+    # No share upload, but still show completion
+    echo "[GHUL] Hellfire stress tests complete!"
+    echo ""
+  fi
+fi

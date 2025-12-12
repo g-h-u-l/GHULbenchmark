@@ -148,7 +148,21 @@ main() {
     # Note: We run it without /benchmark for permanent stress, and kill it after duration
     yellow "  ⚠️  NOTE: A FurMark window will pop up. Leave it open - it will close automatically when the test completes."
     echo
-    gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /msaa=5 \
+    
+    # Check for insane mode resolution override
+    local gpu_width=1920
+    local gpu_height=1080
+    if [[ -n "${GHUL_GPU_RESOLUTION:-}" ]]; then
+      # Parse resolution from format "3840x2160" or "1920x1080"
+      if [[ "$GHUL_GPU_RESOLUTION" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+        gpu_width="${BASH_REMATCH[1]}"
+        gpu_height="${BASH_REMATCH[2]}"
+      fi
+    fi
+    
+    # Use MSAA from environment variable (default to 5 for backward compatibility)
+    local msaa="${GHUL_GPU_MSAA:-5}"
+    gputest /test=fur /width="$gpu_width" /height="$gpu_height" /gpumon_terminal /msaa="$msaa" \
       > "${LOGDIR}/$(get_timestamp)-${HOST}-gpu-stress.log" 2>&1 &
     stress_pid=$!
     export STRESS_PID="$stress_pid"
