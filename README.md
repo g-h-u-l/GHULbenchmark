@@ -60,7 +60,7 @@ git clone https://github.com/g-h-u-l/GHULbenchmark.git
 cd GHULbenchmark
 
 # 3. Install dependencies (recommended)
-sudo ./firstinstall.sh
+sudo ./firstrun.sh
 
 # Or manually:
 sudo pacman -S glmark2 vkmark sysbench mbw stress-ng p7zip mesa-demos jq iperf3 speedtest-cli gamescope lm_sensors
