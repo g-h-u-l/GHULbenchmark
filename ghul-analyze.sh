@@ -482,6 +482,16 @@ printf "  GPU:        %7.1f %%\n" "$GS_NUM"
 printf "  NETWORK:    %7.1f %%\n" "$NS_NUM"
 printf "  OVERALL:    %7.1f %%\n" "$OVERALL"
 
+# Hinweis, falls Kernel sich geändert hat – Performance deltas können Kernel-bedingt sein
+if [[ "$KERNEL_OLD" != "$KERNEL_NEW" ]]; then
+    echo
+    # Hinweis farbig: Label orange/gelb, alter Kernel rot, neuer Kernel grün
+    echo -e "  ${YELLOW}Note: Kernel changed between runs (${RED}${KERNEL_OLD}${YELLOW} → ${GREEN}${KERNEL_NEW}${YELLOW}).${NC}"
+    echo "        Part of the performance and latency deltas"
+    echo "        may be caused by scheduler/driver changes"
+    echo "        in the new kernel."
+fi
+
 ###############################################################################
 # Thermal Analysis (compare sensor data between runs)
 ###############################################################################
@@ -624,33 +634,88 @@ if [[ -f "$SENS_FILE_OLD" && -f "$SENS_FILE_NEW" && -n "$RUN_START_OLD" && -n "$
     
     echo
     echo "  ${bold}Thermal Assessment:${normal}"
-    if [[ "$CPU_TEMP_NEW" != "null" && -n "$CPU_TEMP_NEW" ]]; then
+
+    overall_better=0
+    overall_worse=0
+
+    # CPU Vergleichsbewertung
+    if [[ "$CPU_TEMP_OLD" != "null" && "$CPU_TEMP_NEW" != "null" ]]; then
+        cpu_delta_assess="$(awk -v o="$CPU_TEMP_OLD" -v n="$CPU_TEMP_NEW" 'BEGIN { printf "%.1f", n-o }')"
+
+        if (( $(echo "$cpu_delta_assess > 3.0" | bc -l) )); then
+            echo -e "    CPU: ${YELLOW}+${cpu_delta_assess}°C vs previous run – slightly warmer under load.${NC}"
+            overall_worse=$((overall_worse+1))
+        elif (( $(echo "$cpu_delta_assess < -3.0" | bc -l) )); then
+            echo -e "    CPU: ${GREEN}${cpu_delta_assess}°C vs previous run – cooler under load.${NC}"
+            overall_better=$((overall_better+1))
+        else
+            echo -e "    CPU: ${GREEN}stable thermals (Δ≈0°C vs previous run).${NC}"
+        fi
+
+        # Absolute CPU-Sicherheitsbewertung oben drauf
         if (( $(echo "$CPU_TEMP_NEW >= 100.0" | bc -l) )); then
-            echo -e "    ${RED}⚠ CRITICAL: CPU temperatures ≥ 100°C detected!${NC}"
-            echo -e "    ${RED}   → Check CPU cooler mounting and thermal paste immediately!${NC}"
-            echo -e "    ${RED}   → CPU throttling likely occurred, performance degraded!${NC}"
+            echo -e "       ${RED}⚠ CRITICAL: CPU ≥ 100°C – check cooler mounting / paste!${NC}"
+            overall_worse=$((overall_worse+1))
         elif (( $(echo "$CPU_TEMP_NEW > 80.0" | bc -l) )); then
-            echo -e "    ${YELLOW}⚠ WARNING: CPU temperatures > 80°C - consider improving cooling${NC}"
+            echo -e "       ${YELLOW}⚠ WARNING: CPU > 80°C – consider improving cooling.${NC}"
         fi
     fi
-    
-    if [[ "$GPU_TEMP_NEW" != "null" && -n "$GPU_TEMP_NEW" ]]; then
+
+    # GPU Edge Vergleichsbewertung
+    if [[ "$GPU_TEMP_OLD" != "null" && "$GPU_TEMP_NEW" != "null" ]]; then
+        gpu_delta_assess="$(awk -v o="$GPU_TEMP_OLD" -v n="$GPU_TEMP_NEW" 'BEGIN { printf "%.1f", n-o }')"
+
+        if (( $(echo "$gpu_delta_assess > 3.0" | bc -l) )); then
+            echo -e "    GPU edge: ${YELLOW}+${gpu_delta_assess}°C vs previous run – warmer under load.${NC}"
+            overall_worse=$((overall_worse+1))
+        elif (( $(echo "$gpu_delta_assess < -3.0" | bc -l) )); then
+            echo -e "    GPU edge: ${GREEN}${gpu_delta_assess}°C vs previous run – cooler under load.${NC}"
+            overall_better=$((overall_better+1))
+        else
+            echo -e "    GPU edge: ${GREEN}stable thermals (Δ≈0°C vs previous run).${NC}"
+        fi
+
         if (( $(echo "$GPU_TEMP_NEW >= 95.0" | bc -l) )); then
-            echo -e "    ${RED}⚠ CRITICAL: GPU temperatures ≥ 95°C detected!${NC}"
-            echo -e "    ${RED}   → Check GPU cooler and thermal paste immediately!${NC}"
-            echo -e "    ${RED}   → GPU throttling likely occurred, performance degraded!${NC}"
+            echo -e "       ${RED}⚠ CRITICAL: GPU ≥ 95°C – thermal throttling likely.${NC}"
+            overall_worse=$((overall_worse+1))
         elif (( $(echo "$GPU_TEMP_NEW > 85.0" | bc -l) )); then
-            echo -e "    ${YELLOW}⚠ WARNING: GPU temperatures > 85°C - consider improving cooling${NC}"
+            echo -e "       ${YELLOW}⚠ WARNING: GPU > 85°C – consider a steeper fan curve.${NC}"
         fi
     fi
-    
-    if [[ "$GPU_HOTSPOT_NEW" != "null" && -n "$GPU_HOTSPOT_NEW" ]]; then
+
+    # GPU Hotspot Vergleichsbewertung
+    if [[ "$GPU_HOTSPOT_OLD" != "null" && "$GPU_HOTSPOT_NEW" != "null" ]]; then
+        hotspot_delta_assess="$(awk -v o="$GPU_HOTSPOT_OLD" -v n="$GPU_HOTSPOT_NEW" 'BEGIN { printf "%.1f", n-o }')"
+
+        if (( $(echo "$hotspot_delta_assess > 3.0" | bc -l) )); then
+            echo -e "    GPU hotspot: ${YELLOW}+${hotspot_delta_assess}°C vs previous run – hotter local hotspots.${NC}"
+            overall_worse=$((overall_worse+1))
+        elif (( $(echo "$hotspot_delta_assess < -3.0" | bc -l) )); then
+            echo -e "    GPU hotspot: ${GREEN}${hotspot_delta_assess}°C vs previous run – improved hotspot behavior.${NC}"
+            overall_better=$((overall_better+1))
+        else
+            echo -e "    GPU hotspot: ${GREEN}stable (Δ≈0°C vs previous run).${NC}"
+        fi
+
         if (( $(echo "$GPU_HOTSPOT_NEW >= 110.0" | bc -l) )); then
-            echo -e "    ${RED}⚠ CRITICAL: GPU hotspot ≥ 110°C detected!${NC}"
-            echo -e "    ${RED}   → GPU thermal throttling likely occurred!${NC}"
+            echo -e "       ${RED}⚠ CRITICAL: GPU hotspot ≥ 110°C – fan curve too flat or cooler at limit.${NC}"
+            overall_worse=$((overall_worse+1))
+        elif (( $(echo "$GPU_HOTSPOT_NEW > 100.0" | bc -l) )); then
+            echo -e "       ${YELLOW}⚠ WARNING: GPU hotspot > 100°C – check case airflow and fan curve.${NC}"
         fi
     fi
-    
+
+    echo
+    if (( overall_worse > 0 && overall_better == 0 )); then
+        echo -e "    ${YELLOW}Overall trend: thermals are WORSE than the previous run (hotter in at least one sensor).${NC}"
+    elif (( overall_better > 0 && overall_worse == 0 )); then
+        echo -e "    ${GREEN}Overall trend: thermals IMPROVED vs the previous run.${NC}"
+    elif (( overall_better > 0 && overall_worse > 0 )); then
+        echo -e "    ${YELLOW}Overall trend: MIXED – some sensors cooler, some warmer. Check detailed lines above.${NC}"
+    else
+        echo -e "    ${GREEN}Overall trend: thermals are effectively unchanged compared to the previous run.${NC}"
+    fi
+
     echo
 else
     echo "  (Sensor data not available for thermal comparison)"
@@ -668,5 +733,4 @@ if [[ "$FAN_STATUS" == "unattainable" ]]; then
     echo
 fi
 
-echo
 echo "== Done =="
