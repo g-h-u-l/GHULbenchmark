@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.4.0"
+GHUL_VERSION="0.4.1"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -418,6 +418,31 @@ if [[ "${GHUL_SHARE:-0}" -eq 1 ]]; then
     GHUL_SHARE=0
   fi
 fi
+
+# ---------- Global Ctrl+C handler -----------------------------------------------
+
+ghul_handle_abort() {
+  echo ""
+  echo "[GHUL] Benchmark aborted by user (Ctrl+C)"
+  
+  # Notify shared API (if share mode active)
+  if [[ "${GHUL_SHARE:-0}" -eq 1 ]]; then
+    if [[ -n "${GHUL_SESSION_ID:-}" ]]; then
+      # Normal case: active session exists, inform server about abort
+      if declare -F ghul_abort_share_session >/dev/null 2>&1; then
+        ghul_abort_share_session "user_abort" || true
+      fi
+    else
+      # Sonderfall: Handshake evtl. gelaufen, aber noch keine Session aktiv / kein Upload
+      printf '\033[31m%s\033[0m\n' "[GHUL] API handshake may have run, but no active session was initialized. No data was uploaded, nothing to delete."
+    fi
+  fi
+  
+  printf '\033[31m%s\033[0m\n' "[GHUL] Upload aborted, benchmark run will not be stored."
+  exit 1
+}
+
+trap ghul_handle_abort INT
 
 echo "== GHUL Benchmark (${HOST} @ ${TS}) =="
 
@@ -1557,11 +1582,21 @@ if [[ "${GHUL_HELLFIRE:-0}" -eq 1 ]]; then
   export GHUL_GPU_MSAA="${GPU_MSAA:-5}"
   
   # Run Hellfire tests in sequence (automatically confirm with YES)
-  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-cpu.sh" ]]; then
+  # Track if any test failed - if so, skip all subsequent tests
+  hellfire_failed=0
+  
+  if [[ $hellfire_failed -eq 0 ]] && [[ -f "${HELLFIRE_DIR}/ghul-hellfire-cpu.sh" ]]; then
     echo "[GHUL] Running CPU Hellfire test (${CPU_DURATION}s)..."
-    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-cpu.sh" "$CPU_DURATION" || {
+    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-cpu.sh" "$CPU_DURATION"
+    exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
       echo "[GHUL] Warning: CPU Hellfire test failed or aborted" >&2
-    }
+      # Check if it was a safety stop (exit code 1) vs other error
+      if [[ $exit_code -eq 1 ]]; then
+        hellfire_failed=1
+        echo "[GHUL] Safety stop triggered - skipping remaining Hellfire tests" >&2
+      fi
+    fi
     # Notify API that CPU Hellfire test completed
     if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
       ghul_notify_step "hellfire_cpu" "$(date +%s)"
@@ -1569,11 +1604,18 @@ if [[ "${GHUL_HELLFIRE:-0}" -eq 1 ]]; then
     echo ""
   fi
   
-  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-ram.sh" ]]; then
+  if [[ $hellfire_failed -eq 0 ]] && [[ -f "${HELLFIRE_DIR}/ghul-hellfire-ram.sh" ]]; then
     echo "[GHUL] Running RAM Hellfire test (${RAM_DURATION}s)..."
-    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-ram.sh" "$RAM_DURATION" || {
+    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-ram.sh" "$RAM_DURATION"
+    exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
       echo "[GHUL] Warning: RAM Hellfire test failed or aborted" >&2
-    }
+      # Check if it was a safety stop (exit code 1) vs other error
+      if [[ $exit_code -eq 1 ]]; then
+        hellfire_failed=1
+        echo "[GHUL] Safety stop triggered - skipping remaining Hellfire tests" >&2
+      fi
+    fi
     # Notify API that RAM Hellfire test completed
     if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
       ghul_notify_step "hellfire_ram" "$(date +%s)"
@@ -1581,11 +1623,18 @@ if [[ "${GHUL_HELLFIRE:-0}" -eq 1 ]]; then
     echo ""
   fi
   
-  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-gpu.sh" ]]; then
+  if [[ $hellfire_failed -eq 0 ]] && [[ -f "${HELLFIRE_DIR}/ghul-hellfire-gpu.sh" ]]; then
     echo "[GHUL] Running GPU Hellfire test (${GPU_DURATION}s @ ${GPU_RESOLUTION})..."
-    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-gpu.sh" "$GPU_DURATION" || {
+    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-gpu.sh" "$GPU_DURATION"
+    exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
       echo "[GHUL] Warning: GPU Hellfire test failed or aborted" >&2
-    }
+      # Check if it was a safety stop (exit code 1) vs other error
+      if [[ $exit_code -eq 1 ]]; then
+        hellfire_failed=1
+        echo "[GHUL] Safety stop triggered - skipping remaining Hellfire tests" >&2
+      fi
+    fi
     # Notify API that GPU Hellfire test completed
     if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
       ghul_notify_step "hellfire_gpu" "$(date +%s)"
@@ -1593,20 +1642,30 @@ if [[ "${GHUL_HELLFIRE:-0}" -eq 1 ]]; then
     echo ""
   fi
   
-  # Cooldown between GPU and Cooler test
-  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-cooler.sh" ]]; then
+  # Cooldown between GPU and Cooler test (only if not failed)
+  if [[ $hellfire_failed -eq 0 ]] && [[ -f "${HELLFIRE_DIR}/ghul-hellfire-cooler.sh" ]]; then
     ghul_cooldown 300 "Preparing for Cooler Hellfire test (full system furnace)..."
   fi
   
-  if [[ -f "${HELLFIRE_DIR}/ghul-hellfire-cooler.sh" ]]; then
+  if [[ $hellfire_failed -eq 0 ]] && [[ -f "${HELLFIRE_DIR}/ghul-hellfire-cooler.sh" ]]; then
     echo "[GHUL] Running Cooler Hellfire test (${COOLER_DURATION}s)..."
-    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-cooler.sh" "$COOLER_DURATION" || {
+    echo "YES" | "${HELLFIRE_DIR}/ghul-hellfire-cooler.sh" "$COOLER_DURATION"
+    exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
       echo "[GHUL] Warning: Cooler Hellfire test failed or aborted" >&2
-    }
+      # Check if it was a safety stop (exit code 1) vs other error
+      if [[ $exit_code -eq 1 ]]; then
+        hellfire_failed=1
+        echo "[GHUL] Safety stop triggered - all Hellfire tests completed" >&2
+      fi
+    fi
     # Notify API that Cooler Hellfire test completed
     if [[ "${GHUL_SHARE:-0}" -eq 1 ]] && [[ -n "${GHUL_SESSION_ID:-}" ]]; then
       ghul_notify_step "hellfire_cooler" "$(date +%s)"
     fi
+    echo ""
+  elif [[ $hellfire_failed -eq 1 ]]; then
+    echo "[GHUL] Skipping Cooler Hellfire test due to previous safety stop" >&2
     echo ""
   fi
   

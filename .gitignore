@@ -30,3 +30,6 @@ AMD_FEATURE_REQUEST.md
 # Local development tools (not for repo)
 gitignore/
 
+# Local helper scripts (only for maintainer)
+.ghul-delete-runs.sh
+

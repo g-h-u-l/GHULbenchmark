@@ -83,14 +83,9 @@ main() {
   # Print start message
   echo
   echo "🔥 You have been warned."
-  echo
   echo "Proceeding with GHUL Hellfire…"
-  echo
   echo "This test can kill your CPU in a life-threatening way."
-  echo
-  echo "Good luck, brave warrior."
-  echo
-  echo "🔥🔥🔥"
+  echo "May the force be with you."
   echo
   
   # Print header
@@ -124,13 +119,15 @@ main() {
     # Matrix stress: CPU-intensive matrix operations
     # Crypt stress: Cryptographic operations
     # CPU stress: Generic CPU stress
+    local log_file="${LOGDIR}/$(get_timestamp)-${HOST}-cpu-stress.log"
     stress-ng \
       --matrix "$cores" \
       --crypt "$cores" \
       --cpu "$cores" \
       --timeout "${DURATION}s" \
       --metrics-brief \
-      --log-file "${LOGDIR}/$(get_timestamp)-${HOST}-cpu-stress.log" &
+      --log-file "$log_file" \
+      >"$log_file" 2>&1 &
     
     STRESS_PID=$!
     green "  stress-ng started (PID: $STRESS_PID)"
@@ -152,8 +149,9 @@ main() {
     local abort_reason=""
     
     if [[ -n "${HELLFIRE_USER_ABORTED:-}" ]]; then
-      # User abort was handled by cleanup handler
-      exit 0
+      test_status="FAILED"
+      abort_reason="User aborted (Ctrl+C)"
+      red "  Test aborted by user (Ctrl+C)"
     elif [[ -n "${HELLFIRE_TEMP_FAILED:-}" ]]; then
       test_status="ABORTED"
       abort_reason="CPU limit exceeded for 5s (safety shutdown)"
@@ -170,9 +168,12 @@ main() {
   # Stop sensor monitoring
   stop_sensor_monitor "$HELLFIRE_TEST_NAME"
   
-  # Print summary (only if not aborted by user)
-  if [[ -z "${HELLFIRE_USER_ABORTED:-}" ]]; then
-    print_test_summary "$HELLFIRE_TEST_NAME" "$DURATION" "$test_status" "$abort_reason"
+  # Print summary
+  print_test_summary "$HELLFIRE_TEST_NAME" "$DURATION" "$test_status" "$abort_reason"
+  
+  # Exit with error code if failed
+  if [[ "$test_status" == "FAILED" || "$test_status" == "ABORTED" ]]; then
+    exit 1
   fi
 }
 

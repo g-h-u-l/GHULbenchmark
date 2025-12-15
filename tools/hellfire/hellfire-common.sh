@@ -510,6 +510,7 @@ monitor_gpu_safety() {
   
   local fan_fail_start=0
   local hotspot_over_start=0
+  local vram_over_85_start=0
   local last_warning_time=0
   
   # Status file for communication with main process
@@ -545,13 +546,82 @@ monitor_gpu_safety() {
     # VRAM > 90°C
     if [[ "$vram" != "null" && -n "$vram" ]] && (( $(echo "$vram > $vram_critical" | bc -l 2>/dev/null || echo 0) )); then
       export HELLFIRE_GPU_SAFETY_FAILED=1
-      export HELLFIRE_GPU_SAFETY_REASON="VRAM temperature ${vram}°C exceeded ${vram_critical}°C"
+      # Build scientific failure reason with all measurable data
+      local failure_reason="VRAM temperature ${vram}°C exceeded critical threshold (${vram_critical}°C)"
+      if [[ "$hotspot" != "null" && -n "$hotspot" ]]; then
+        failure_reason="${failure_reason}; GPU DYE (hotspot) ${hotspot}°C"
+      fi
+      if [[ "$fan" != "null" && -n "$fan" ]]; then
+        failure_reason="${failure_reason}; Fan ${fan} RPM (${fan}%)"
+      fi
+      failure_reason="${failure_reason}. Observed: VRAM and/or GPU DYE too hot, fan curve too flat. No workaround available (neither Linux nor Windows). Manufacturer feature request recommended."
+      export HELLFIRE_GPU_SAFETY_REASON="$failure_reason"
       # Write to status file for main process
       echo "FAILED" > "$status_file"
       echo "${HELLFIRE_GPU_SAFETY_REASON}" > "${status_file}.reason"
       red "  🚨 IMMEDIATE STOP: VRAM ${vram}°C > ${vram_critical}°C"
+      if [[ "$hotspot" != "null" && -n "$hotspot" ]]; then
+        red "     GPU DYE (hotspot): ${hotspot}°C"
+      fi
+      if [[ "$fan" != "null" && -n "$fan" ]]; then
+        red "     Fan: ${fan} RPM (${fan}%)"
+      fi
+      red "     VRAM and/or GPU DYE too hot, fan curve too flat"
       kill "$stress_pid" 2>/dev/null || true
       break
+    fi
+    
+    # Delayed stop: VRAM > 85°C for > 10 seconds
+    if [[ "$vram" != "null" && -n "$vram" ]] && (( $(echo "$vram > $vram_warning" | bc -l 2>/dev/null || echo 0) )); then
+      if [[ $vram_over_85_start -eq 0 ]]; then
+        vram_over_85_start=$current_time
+      fi
+      
+      local vram_over_duration
+      vram_over_duration=$((current_time - vram_over_85_start))
+      
+      if [[ $vram_over_duration -ge 10 ]]; then
+        export HELLFIRE_GPU_SAFETY_FAILED=1
+        # Build scientific failure reason with all measurable data
+        local failure_reason="VRAM temperature ${vram}°C exceeded safe threshold (${vram_warning}°C) for ${vram_over_duration}s"
+        if [[ "$hotspot" != "null" && -n "$hotspot" ]]; then
+          failure_reason="${failure_reason}; GPU DYE (hotspot) ${hotspot}°C"
+        fi
+        if [[ "$fan" != "null" && -n "$fan" ]]; then
+          # Fan format: AMD uses RPM, NVIDIA uses %
+          local fan_display
+          if (( $(echo "$fan > 100" | bc -l 2>/dev/null || echo 0) )); then
+            fan_display="${fan} RPM"
+          else
+            fan_display="${fan}%"
+          fi
+          failure_reason="${failure_reason}; Fan ${fan_display}"
+        fi
+        failure_reason="${failure_reason}. Observed: VRAM and/or GPU DYE too hot, fan curve too flat. No workaround available (neither Linux nor Windows). Manufacturer feature request recommended."
+        export HELLFIRE_GPU_SAFETY_REASON="$failure_reason"
+        # Write to status file for main process
+        echo "FAILED" > "$status_file"
+        echo "${HELLFIRE_GPU_SAFETY_REASON}" > "${status_file}.reason"
+        red "  🚨 DELAYED STOP: VRAM ${vram}°C > ${vram_warning}°C for ${vram_over_duration}s"
+        if [[ "$hotspot" != "null" && -n "$hotspot" ]]; then
+          red "     GPU DYE (hotspot): ${hotspot}°C"
+        fi
+        if [[ "$fan" != "null" && -n "$fan" ]]; then
+          # Fan format: AMD uses RPM, NVIDIA uses %
+          local fan_display
+          if (( $(echo "$fan > 100" | bc -l 2>/dev/null || echo 0) )); then
+            fan_display="${fan} RPM"
+          else
+            fan_display="${fan}%"
+          fi
+          red "     Fan: ${fan_display}"
+        fi
+        red "     VRAM and/or GPU DYE too hot, fan curve too flat"
+        kill "$stress_pid" 2>/dev/null || true
+        break
+      fi
+    else
+      vram_over_85_start=0
     fi
     
     # Fan check: only fail if GPU is warm AND fan is low
@@ -618,11 +688,41 @@ monitor_gpu_safety() {
         
           if [[ $hotspot_duration -ge 2 ]]; then
             export HELLFIRE_GPU_SAFETY_FAILED=1
-            export HELLFIRE_GPU_SAFETY_REASON="Hotspot temperature exceeded ${hotspot_critical}°C for ${hotspot_duration}s - current: ${hotspot}°C"
+            # Build scientific failure reason with all measurable data
+            local failure_reason="GPU DYE (hotspot) temperature ${hotspot}°C exceeded critical threshold (${hotspot_critical}°C) for ${hotspot_duration}s"
+            if [[ "$vram" != "null" && -n "$vram" ]]; then
+              failure_reason="${failure_reason}; VRAM ${vram}°C"
+            fi
+            if [[ "$fan" != "null" && -n "$fan" ]]; then
+              # Fan format: AMD uses RPM, NVIDIA uses %
+              local fan_display
+              if (( $(echo "$fan > 100" | bc -l 2>/dev/null || echo 0) )); then
+                fan_display="${fan} RPM"
+              else
+                fan_display="${fan}%"
+              fi
+              failure_reason="${failure_reason}; Fan ${fan_display}"
+            fi
+            failure_reason="${failure_reason}. Observed: VRAM and/or GPU DYE too hot, fan curve too flat. No workaround available (neither Linux nor Windows). Manufacturer feature request recommended."
+            export HELLFIRE_GPU_SAFETY_REASON="$failure_reason"
             # Write to status file for main process
             echo "FAILED" > "$status_file"
             echo "${HELLFIRE_GPU_SAFETY_REASON}" > "${status_file}.reason"
-            red "  🚨 DELAYED STOP: Hotspot ${hotspot}°C > ${hotspot_critical}°C for ${hotspot_duration}s"
+            red "  🚨 DELAYED STOP: GPU DYE (hotspot) ${hotspot}°C > ${hotspot_critical}°C for ${hotspot_duration}s"
+            if [[ "$vram" != "null" && -n "$vram" ]]; then
+              red "     VRAM: ${vram}°C"
+            fi
+            if [[ "$fan" != "null" && -n "$fan" ]]; then
+              # Fan format: AMD uses RPM, NVIDIA uses %
+              local fan_display
+              if (( $(echo "$fan > 100" | bc -l 2>/dev/null || echo 0) )); then
+                fan_display="${fan} RPM"
+              else
+                fan_display="${fan}%"
+              fi
+              red "     Fan: ${fan_display}"
+            fi
+            red "     VRAM and/or GPU DYE too hot, fan curve too flat"
             kill "$stress_pid" 2>/dev/null || true
             break
           fi
@@ -680,6 +780,7 @@ cleanup_hellfire() {
   # Set abort status
   if [[ "$signal" == "INT" || "$signal" == "TERM" ]]; then
     export HELLFIRE_USER_ABORTED=1
+    local test_name="${HELLFIRE_TEST_NAME:-unknown}"
     if [[ -n "${HELLFIRE_START_TIME:-}" ]]; then
       local current_time
       current_time="$(date +%s)"
@@ -688,58 +789,59 @@ cleanup_hellfire() {
       export HELLFIRE_ABORT_TIME="$elapsed"
     fi
     
-    # Print funny abort comment based on test type
-    echo
-    local test_name="${HELLFIRE_TEST_NAME:-unknown}"
-    if [[ "$test_name" == "ram" ]]; then
-      yellow "  Abort acknowledged. RAM integrity preserved."
-    elif [[ "$test_name" == "gpu" ]]; then
-      yellow "  Hellfire run aborted: no guts today — no RMA tomorrow."
-      yellow "  Your GPU thanks you."
-    elif [[ "$test_name" == "cooler" ]]; then
-      yellow "  Bailed out? No courage today?"
-      echo
-      yellow "  Probably smart — RMA isn't a subscription service."
-      echo
-      yellow "  Understandable: Hellfire Cooler has ended careers!"
-      echo
-      yellow "  Your local hardware dealer shakes its head in quiet disappointment..."
-    else
-      # CPU or unknown
-      yellow "  Hellfire run aborted: no guts today — no RMA tomorrow."
-      yellow "  Your CPU thanks you."
-    fi
-    echo
-    
     # Silent cleanup for user aborts (no output)
     # Stop sensor monitor
     if [[ -n "${HELLFIRE_TEST_NAME:-}" ]]; then
       stop_sensor_monitor "${HELLFIRE_TEST_NAME}" >/dev/null 2>&1 || true
     fi
     
-    # Kill stress processes
+    # Kill primary stress process
     if [[ -n "${STRESS_PID:-}" ]]; then
       kill "$STRESS_PID" 2>/dev/null || true
       wait "$STRESS_PID" 2>/dev/null || true
     fi
     
-    # For GPU tests: also kill gputest/furmark processes explicitly
-    if [[ "$test_name" == "gpu" ]]; then
-      # Kill gputest processes
-      pkill -f "gputest" 2>/dev/null || true
-      pkill -f "furmark" 2>/dev/null || true
-      # Wait a bit and verify they're really dead
-      sleep 0.5
-      if pgrep -f "gputest" >/dev/null 2>&1; then
-        pkill -9 -f "gputest" 2>/dev/null || true
+    # Sofortiges Killen eines bekannten GPU-Prozesses per PID
+    if [[ -n "${GPUTEST_PID:-}" ]]; then
+      kill "$GPUTEST_PID" 2>/dev/null || true
+      sleep 0.1
+      if kill -0 "$GPUTEST_PID" 2>/dev/null; then
+        kill -TERM "$GPUTEST_PID" 2>/dev/null || true
+        sleep 0.1
       fi
-      if pgrep -f "furmark" >/dev/null 2>&1; then
-        pkill -9 -f "furmark" 2>/dev/null || true
+      if kill -0 "$GPUTEST_PID" 2>/dev/null; then
+        kill -KILL "$GPUTEST_PID" 2>/dev/null || true
       fi
+      wait "$GPUTEST_PID" 2>/dev/null || true
     fi
     
-    # Exit immediately after user abort - no summary, no cleanup messages
-    exit 0
+    # Additionally for GPU/Cooler: kill any remaining gputest/furmark processes by name (fallback)
+    if [[ "$test_name" == "gpu" || "$test_name" == "cooler" ]]; then
+      pkill -f "gputest.*fur" 2>/dev/null || true
+      pkill -f "gputest" 2>/dev/null || true
+      pkill -f "furmark" 2>/dev/null || true
+    fi
+    
+    # Special path for Cooler test: print feedback + summary directly
+    if [[ "$test_name" == "cooler" ]]; then
+      local dur="${HELLFIRE_DURATION:-${DURATION:-0}}"
+      local reason="User aborted (Ctrl+C)"
+      red "  Test aborted by user (Ctrl+C)"
+      print_cooler_summary "${HELLFIRE_TEST_NAME:-cooler}" "$dur" "FAILED" "$reason"
+      exit 1
+    fi
+    
+    # Special path for GPU test: print feedback + summary directly
+    if [[ "$test_name" == "gpu" ]]; then
+      local dur="${HELLFIRE_DURATION:-${DURATION:-0}}"
+      local reason="User aborted (Ctrl+C)"
+      red "  Test aborted by user (Ctrl+C)"
+      print_test_summary "${HELLFIRE_TEST_NAME:-gpu}" "$dur" "FAILED" "$reason"
+      exit 1
+    fi
+    
+    # For other tests: return control to main flow
+    return 0
   fi
   
   # Normal cleanup (EXIT signal)
@@ -1700,6 +1802,7 @@ monitor_cooler_safety() {
   
   local cpu_over_start=0
   local gpu_hotspot_over_start=0
+  local vram_over_85_start=0
   local last_warning_time=0
   local vram_warning_85_shown=0
   local vram_warning_90_shown=0
@@ -1779,8 +1882,38 @@ monitor_cooler_safety() {
       # Immediate stop: VRAM > 90°C
       if [[ "$vram" != "null" && -n "$vram" ]] && (( $(echo "$vram > $vram_critical" | bc -l 2>/dev/null || echo 0) )); then
         export HELLFIRE_COOLER_SAFETY_FAILED=1
-        export HELLFIRE_COOLER_SAFETY_REASON="VRAM temperature ${vram}°C exceeded ${vram_critical}°C"
+        # Build scientific failure reason with all measurable data
+        local failure_reason="VRAM temperature ${vram}°C exceeded critical threshold (${vram_critical}°C)"
+        if [[ "$hotspot" != "null" && -n "$hotspot" ]]; then
+          failure_reason="${failure_reason}; GPU DYE (hotspot) ${hotspot}°C"
+        fi
+        if [[ "$fan" != "null" && -n "$fan" ]]; then
+          # Fan format: AMD uses RPM, NVIDIA uses %
+          local fan_display
+          if (( $(echo "$fan > 100" | bc -l 2>/dev/null || echo 0) )); then
+            fan_display="${fan} RPM"
+          else
+            fan_display="${fan}%"
+          fi
+          failure_reason="${failure_reason}; Fan ${fan_display}"
+        fi
+        failure_reason="${failure_reason}. Observed: VRAM and/or GPU DYE too hot, fan curve too flat. No workaround available (neither Linux nor Windows). Manufacturer feature request recommended."
+        export HELLFIRE_COOLER_SAFETY_REASON="$failure_reason"
         red "  🚨 IMMEDIATE STOP: VRAM ${vram}°C > ${vram_critical}°C"
+        if [[ "$hotspot" != "null" && -n "$hotspot" ]]; then
+          red "     GPU DYE (hotspot): ${hotspot}°C"
+        fi
+        if [[ "$fan" != "null" && -n "$fan" ]]; then
+          # Fan format: AMD uses RPM, NVIDIA uses %
+          local fan_display
+          if (( $(echo "$fan > 100" | bc -l 2>/dev/null || echo 0) )); then
+            fan_display="${fan} RPM"
+          else
+            fan_display="${fan}%"
+          fi
+          red "     Fan: ${fan_display}"
+        fi
+        red "     VRAM and/or GPU DYE too hot, fan curve too flat"
         if [[ -n "$cpu_pid" ]]; then
           kill "$cpu_pid" 2>/dev/null || true
         fi
@@ -1788,6 +1921,52 @@ monitor_cooler_safety() {
           kill "$gpu_pid" 2>/dev/null || true
         fi
         return
+      fi
+      
+      # Delayed stop: VRAM > 85°C for > 10 seconds
+      if [[ "$vram" != "null" && -n "$vram" ]]; then
+        local vram_num
+        vram_num="$(echo "$vram" | awk '{print $1+0}')"
+        
+        if (( $(echo "$vram_num > $vram_warning" | bc -l 2>/dev/null || echo 0) )); then
+          if [[ $vram_over_85_start -eq 0 ]]; then
+            vram_over_85_start=$current_time
+          fi
+          
+          local vram_over_duration
+          vram_over_duration=$((current_time - vram_over_85_start))
+          
+          if [[ $vram_over_duration -ge 10 ]]; then
+            export HELLFIRE_COOLER_SAFETY_FAILED=1
+            # Build scientific failure reason with all measurable data
+            local failure_reason="VRAM temperature ${vram}°C exceeded safe threshold (${vram_warning}°C) for ${vram_over_duration}s"
+            if [[ "$hotspot" != "null" && -n "$hotspot" ]]; then
+              failure_reason="${failure_reason}; GPU DYE (hotspot) ${hotspot}°C"
+            fi
+            if [[ "$fan" != "null" && -n "$fan" ]]; then
+              failure_reason="${failure_reason}; Fan ${fan} RPM (${fan}%)"
+            fi
+            failure_reason="${failure_reason}. Observed: VRAM and/or GPU DYE too hot, fan curve too flat. No workaround available (neither Linux nor Windows). Manufacturer feature request recommended."
+            export HELLFIRE_COOLER_SAFETY_REASON="$failure_reason"
+            red "  🚨 DELAYED STOP: VRAM ${vram}°C > ${vram_warning}°C for ${vram_over_duration}s"
+            if [[ "$hotspot" != "null" && -n "$hotspot" ]]; then
+              red "     GPU DYE (hotspot): ${hotspot}°C"
+            fi
+            if [[ "$fan" != "null" && -n "$fan" ]]; then
+              red "     Fan: ${fan} RPM (${fan}%)"
+            fi
+            red "     VRAM and/or GPU DYE too hot, fan curve too flat"
+            if [[ -n "$cpu_pid" ]]; then
+              kill "$cpu_pid" 2>/dev/null || true
+            fi
+            if [[ -n "$gpu_pid" ]]; then
+              kill "$gpu_pid" 2>/dev/null || true
+            fi
+            return
+          fi
+        else
+          vram_over_85_start=0
+        fi
       fi
       
       # Delayed stop: GPU Hotspot > 100°C for 2 seconds
@@ -1802,8 +1981,38 @@ monitor_cooler_safety() {
           
           if [[ $hotspot_duration -ge 2 ]]; then
             export HELLFIRE_COOLER_SAFETY_FAILED=1
-            export HELLFIRE_COOLER_SAFETY_REASON="GPU hotspot temperature ${hotspot}°C exceeded ${gpu_hotspot_critical}°C for ${hotspot_duration}s"
-            red "  🚨 DELAYED STOP: GPU hotspot ${hotspot}°C > ${gpu_hotspot_critical}°C for ${hotspot_duration}s"
+            # Build scientific failure reason with all measurable data
+            local failure_reason="GPU DYE (hotspot) temperature ${hotspot}°C exceeded critical threshold (${gpu_hotspot_critical}°C) for ${hotspot_duration}s"
+            if [[ "$vram" != "null" && -n "$vram" ]]; then
+              failure_reason="${failure_reason}; VRAM ${vram}°C"
+            fi
+            if [[ "$fan" != "null" && -n "$fan" ]]; then
+              # Fan format: AMD uses RPM, NVIDIA uses %
+              local fan_display
+              if (( $(echo "$fan > 100" | bc -l 2>/dev/null || echo 0) )); then
+                fan_display="${fan} RPM"
+              else
+                fan_display="${fan}%"
+              fi
+              failure_reason="${failure_reason}; Fan ${fan_display}"
+            fi
+            failure_reason="${failure_reason}. Observed: VRAM and/or GPU DYE too hot, fan curve too flat. No workaround available (neither Linux nor Windows). Manufacturer feature request recommended."
+            export HELLFIRE_COOLER_SAFETY_REASON="$failure_reason"
+            red "  🚨 DELAYED STOP: GPU DYE (hotspot) ${hotspot}°C > ${gpu_hotspot_critical}°C for ${hotspot_duration}s"
+            if [[ "$vram" != "null" && -n "$vram" ]]; then
+              red "     VRAM: ${vram}°C"
+            fi
+            if [[ "$fan" != "null" && -n "$fan" ]]; then
+              # Fan format: AMD uses RPM, NVIDIA uses %
+              local fan_display
+              if (( $(echo "$fan > 100" | bc -l 2>/dev/null || echo 0) )); then
+                fan_display="${fan} RPM"
+              else
+                fan_display="${fan}%"
+              fi
+              red "     Fan: ${fan_display}"
+            fi
+            red "     VRAM and/or GPU DYE too hot, fan curve too flat"
             if [[ -n "$cpu_pid" ]]; then
               kill "$cpu_pid" 2>/dev/null || true
             fi
@@ -2050,7 +2259,7 @@ print_cooler_summary() {
   green "  Test: $test_name"
   green "  Duration: $duration seconds"
   
-  # Find sensor log file
+  # Find sensor log file (for reference only, no live evaluation here)
   local log_file=""
   if ls ${sensor_log_pattern} 2>/dev/null | head -1 | grep -q .; then
     log_file="$(ls -t ${sensor_log_pattern} 2>/dev/null | head -1)"
@@ -2058,187 +2267,133 @@ print_cooler_summary() {
     echo
   fi
   
-  if [[ -n "$log_file" ]]; then
-    # Parse sensor log
-    local temp_stats
-    temp_stats="$(parse_sensor_log "$log_file")"
-    
-    if [[ -n "$temp_stats" ]]; then
-      # Source the stats as variables
-      eval "$temp_stats"
-      
-      echo "  Temperature Peaks:"
-      echo
-      
-      if [[ -n "${CPU_TEMP_MAX:-}" ]]; then
-        printf '    CPU max:         %.1f°C\n' "$CPU_TEMP_MAX"
-      else
-        echo "    CPU max:         n/a"
-      fi
-      
-      if [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
-        printf '    GPU hotspot max: %.1f°C\n' "$GPU_HOTSPOT_MAX"
-      else
-        echo "    GPU hotspot max: n/a"
-      fi
-      
-      if [[ -n "${GPU_VRAM_MAX:-}" ]]; then
-        printf '    GPU VRAM max:    %.1f°C\n' "$GPU_VRAM_MAX"
-      else
-        echo "    GPU VRAM max:    n/a"
-      fi
-      
-      # NVMe temperature (if available in sensor log)
-      if [[ -n "${NVME_TEMP_MAX:-}" ]]; then
-        printf '    NVMe max:        %.1f°C\n' "$NVME_TEMP_MAX"
-      else
-        echo "    NVMe max:        n/a"
-      fi
-      
-      echo
-      echo "  Power Averages:"
-      echo
-      
-      if [[ -n "${GPU_POWER_AVG:-}" ]]; then
-        printf '    GPU avg power:   %.1f W\n' "$GPU_POWER_AVG"
-      else
-        echo "    GPU avg power:   n/a"
-      fi
-      
-      # CPU power (if available)
-      local cpu_power_available=0
-      if [[ -n "${CPU_PKG_POWER_AVG:-}" ]]; then
-        local cpu_power_num
-        cpu_power_num="$(echo "$CPU_PKG_POWER_AVG" | awk '{print $1+0}')"
-        if (( $(echo "$cpu_power_num > 0" | bc -l 2>/dev/null || echo 0) )); then
-          printf '    CPU avg power:   %.1f W\n' "$CPU_PKG_POWER_AVG"
-          cpu_power_available=1
-        else
-          echo "    CPU avg power:   n/a (no CPU power sensors available on this hardware)"
-        fi
-      else
-        echo "    CPU avg power:   n/a (no CPU power sensors available on this hardware)"
-      fi
-      
-      # Calculate total power
-      local total_power=0
-      local total_power_text=""
-      if [[ -n "${GPU_POWER_AVG:-}" ]]; then
-        total_power="$(echo "$GPU_POWER_AVG" | awk '{print $1+0}')"
-      fi
-      
-      if [[ $cpu_power_available -eq 1 ]] && [[ -n "${CPU_PKG_POWER_AVG:-}" ]]; then
-        local cpu_power
-        cpu_power="$(echo "$CPU_PKG_POWER_AVG" | awk '{print $1+0}')"
-        total_power="$(echo "$total_power $cpu_power" | awk '{printf "%.1f", $1 + $2}')"
-        total_power_text="$(printf '%.1f W' "$total_power")"
-      elif (( $(echo "$total_power > 0" | bc -l 2>/dev/null || echo 0) )); then
-        total_power_text="$(printf '%.1f W (CPU power not measurable on this system)' "$total_power")"
-      else
-        total_power_text="n/a"
-      fi
-      
-      echo "    Total approx:    $total_power_text"
-      
-      echo
-      
-      # Calculate worst temperature (max of CPU, GPU hotspot, VRAM)
-      local worst_temp=0
-      if [[ -n "${CPU_TEMP_MAX:-}" ]]; then
-        worst_temp="$(echo "$CPU_TEMP_MAX" | awk '{print $1+0}')"
-      fi
-      if [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
-        local gpu_hotspot_num
-        gpu_hotspot_num="$(echo "$GPU_HOTSPOT_MAX" | awk '{print $1+0}')"
-        if (( $(echo "$gpu_hotspot_num > $worst_temp" | bc -l 2>/dev/null || echo 0) )); then
-          worst_temp="$gpu_hotspot_num"
-        fi
-      fi
-      if [[ -n "${GPU_VRAM_MAX:-}" ]]; then
-        local gpu_vram_num
-        gpu_vram_num="$(echo "$GPU_VRAM_MAX" | awk '{print $1+0}')"
-        if (( $(echo "$gpu_vram_num > $worst_temp" | bc -l 2>/dev/null || echo 0) )); then
-          worst_temp="$gpu_vram_num"
-        fi
-      fi
-      
-      local thermal_status="OK"
-      if (( $(echo "$worst_temp >= 95" | bc -l 2>/dev/null || echo 0) )); then
-        thermal_status="CRITICAL"
-      elif (( $(echo "$worst_temp >= 85" | bc -l 2>/dev/null || echo 0) )); then
-        thermal_status="WARM"
-      fi
-      
-      case "$thermal_status" in
-        OK)
-          green "  Overall Thermal Status: ✅ OK"
-          ;;
-        WARM)
-          yellow "  Overall Thermal Status: ⚠️ WARM"
-          ;;
-        CRITICAL)
-          red "  Overall Thermal Status: 🚨 CRITICAL"
-          ;;
-      esac
-      
-      echo
-      
-      # Calculate and display cooler score (only if not failed)
-      if [[ "$test_status" != "FAILED" ]]; then
-        # Check if safety stop was triggered
-        local safety_stop=0
-        if [[ -n "${HELLFIRE_COOLER_SAFETY_FAILED:-}" ]]; then
-          safety_stop=1
-        fi
-        
-        # Calculate cooler score
-        local cooler_score
-        cooler_score="$(calculate_cooler_score \
-          "${CPU_TEMP_MAX:-null}" \
-          "${GPU_HOTSPOT_MAX:-null}" \
-          "${GPU_VRAM_MAX:-null}" \
-          "${NVME_TEMP_MAX:-null}" \
-          "${GPU_POWER_AVG:-null}" \
-          "${CPU_PKG_POWER_AVG:-null}")"
-        
-        # Apply minimum score for 88-90°C range without safety stop
-        if [[ $safety_stop -eq 0 ]] && (( $(echo "$worst_temp >= 88 && $worst_temp <= 90" | bc -l 2>/dev/null || echo 0) )); then
-          local score_num
-          score_num="$(echo "$cooler_score" | awk '{print $1+0}')"
-          if [[ $score_num -lt 45 ]]; then
-            cooler_score=45
-          fi
-        fi
-        
-        # Get tier based on worst_temp and safety_stop (not score)
-        local cooler_tier
-        cooler_tier="$(get_cooler_tier "$worst_temp" "$safety_stop")"
-        local cooler_tier_desc
-        cooler_tier_desc="$(get_cooler_tier_desc "$cooler_tier")"
-        local cooler_comment
-        cooler_comment="$(get_cooler_comment "$cooler_tier")"
-        
-        echo "  🥇 GHUL Hellfire Cooler Rating v1.0"
-        echo
-        echo "  Score: $cooler_score / 100"
-        echo "  Tier:  $cooler_tier  ($cooler_tier_desc)"
-        echo
-        echo "  Comment:"
-        echo "    $cooler_comment"
-        echo
-      fi
-    else
-      yellow "    Warning: Could not parse sensor log or no temperature data found"
-      echo
-    fi
-  elif [[ -z "$log_file" ]]; then
-    yellow "  Warning: Sensor log not found"
-    echo
-  fi
-  
   # Test result
   if [[ "$test_status" == "PASS" ]]; then
     green "  Result: PASS – no thermal limit reached, no abort triggered."
+    
+    # Kurze Zusammenfassung der Thermik nur bei bestandenem Test
+    if [[ -n "$log_file" ]]; then
+      # Sensor-Log auswerten
+      local temp_stats
+      temp_stats="$(parse_sensor_log "$log_file")"
+      
+      if [[ -n "$temp_stats" ]]; then
+        # Import stats into shell variables
+        eval "$temp_stats"
+        
+        echo
+        echo "  Temperature Peaks:"
+        echo
+        
+        if [[ -n "${CPU_TEMP_MAX:-}" ]]; then
+          printf '    CPU max:         %.1f°C\n' "$CPU_TEMP_MAX"
+        else
+          echo "    CPU max:         n/a"
+        fi
+        
+        if [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
+          printf '    GPU hotspot max: %.1f°C\n' "$GPU_HOTSPOT_MAX"
+        else
+          echo "    GPU hotspot max: n/a"
+        fi
+        
+        if [[ -n "${GPU_VRAM_MAX:-}" ]]; then
+          printf '    GPU VRAM max:    %.1f°C\n' "$GPU_VRAM_MAX"
+        else
+          echo "    GPU VRAM max:    n/a"
+        fi
+        
+        if [[ -n "${NVME_TEMP_MAX:-}" ]]; then
+          printf '    NVMe max:        %.1f°C\n' "$NVME_TEMP_MAX"
+        else
+          echo "    NVMe max:        n/a"
+        fi
+        
+        echo
+        echo "  Power Averages:"
+        echo
+        
+        if [[ -n "${GPU_POWER_AVG:-}" ]]; then
+          printf '    GPU avg power:   %.1f W\n' "$GPU_POWER_AVG"
+        else
+          echo "    GPU avg power:   n/a"
+        fi
+        
+        # CPU power (falls vorhanden)
+        local cpu_power_available=0
+        if [[ -n "${CPU_PKG_POWER_AVG:-}" ]]; then
+          local cpu_power_num
+          cpu_power_num="$(echo "$CPU_PKG_POWER_AVG" | awk '{print $1+0}')"
+          if (( $(echo "$cpu_power_num > 0" | bc -l 2>/dev/null || echo 0) )); then
+            printf '    CPU avg power:   %.1f W\n' "$CPU_PKG_POWER_AVG"
+            cpu_power_available=1
+          else
+            echo "    CPU avg power:   n/a (no CPU power sensors available on this hardware)"
+          fi
+        else
+          echo "    CPU avg power:   n/a (no CPU power sensors available on this hardware)"
+        fi
+        
+        # Estimate total power draw
+        local total_power=0
+        local total_power_text=""
+        if [[ -n "${GPU_POWER_AVG:-}" ]]; then
+          total_power="$(echo "$GPU_POWER_AVG" | awk '{print $1+0}')"
+        fi
+        if [[ $cpu_power_available -eq 1 ]] && [[ -n "${CPU_PKG_POWER_AVG:-}" ]]; then
+          local cpu_power
+          cpu_power="$(echo "$CPU_PKG_POWER_AVG" | awk '{print $1+0}')"
+          total_power="$(echo "$total_power $cpu_power" | awk '{printf "%.1f", $1 + $2}')"
+          total_power_text="$(printf '%.1f W' "$total_power")"
+        elif (( $(echo "$total_power > 0" | bc -l 2>/dev/null || echo 0) )); then
+          total_power_text="$(printf '%.1f W (CPU power not measurable on this system)' "$total_power")"
+        else
+          total_power_text="n/a"
+        fi
+        echo "    Total approx:    $total_power_text"
+        
+        echo
+        
+        # Einfacher Gesamt-Thermik-Status basierend auf schlimmster Temperatur
+        local worst_temp=0
+        if [[ -n "${CPU_TEMP_MAX:-}" ]]; then
+          worst_temp="$(echo "$CPU_TEMP_MAX" | awk '{print $1+0}')"
+        fi
+        if [[ -n "${GPU_HOTSPOT_MAX:-}" ]]; then
+          local gpu_hotspot_num
+          gpu_hotspot_num="$(echo "$GPU_HOTSPOT_MAX" | awk '{print $1+0}')"
+          if (( $(echo "$gpu_hotspot_num > $worst_temp" | bc -l 2>/dev/null || echo 0) )); then
+            worst_temp="$gpu_hotspot_num"
+          fi
+        fi
+        if [[ -n "${GPU_VRAM_MAX:-}" ]]; then
+          local gpu_vram_num
+          gpu_vram_num="$(echo "$GPU_VRAM_MAX" | awk '{print $1+0}')"
+          if (( $(echo "$gpu_vram_num > $worst_temp" | bc -l 2>/dev/null || echo 0) )); then
+            worst_temp="$gpu_vram_num"
+          fi
+        fi
+        
+        local thermal_status="OK"
+        if (( $(echo "$worst_temp >= 95" | bc -l 2>/dev/null || echo 0) )); then
+          thermal_status="CRITICAL"
+        elif (( $(echo "$worst_temp >= 85" | bc -l 2>/dev/null || echo 0) )); then
+          thermal_status="WARM"
+        fi
+        
+        case "$thermal_status" in
+          OK)
+            green "  Overall Thermal Status: ✅ OK"
+            ;;
+          WARM)
+            yellow "  Overall Thermal Status: ⚠️ WARM"
+            ;;
+          CRITICAL)
+            red "  Overall Thermal Status: 🚨 CRITICAL"
+            ;;
+        esac
+      fi
+    fi
   elif [[ "$test_status" == "FAILED" ]]; then
     red "  Result: FAILED"
     if [[ -n "$abort_reason" ]]; then

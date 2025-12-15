@@ -295,12 +295,16 @@ api_upload() {
 api_finalize() {
   # Finalize session (mark as completed)
   local session_id="$1"
+  local status_field="${2:-completed}"
+  local reason="${3:-}"
   
   local response
   response="$(curl -sS -X POST "${API_BASE}/finalize" \
     -H "Content-Type: application/json" \
     -d "{
-      \"session_id\": \"${session_id}\"
+      \"session_id\": \"${session_id}\",
+      \"status\": \"${status_field}\",
+      \"reason\": \"${reason}\"
     }" 2>&1)"
   
   local status
@@ -312,9 +316,49 @@ api_finalize() {
     return 1
   fi
   
-  echo "[GHUL] Session finalized"
+  echo "[GHUL] Session finalized (status: ${status_field})"
   
   return 0
+}
+
+# ---------- Abort helper --------------------------------------------------------
+
+ghul_abort_share_session() {
+  # Mark current session as aborted on the server (user abort / Ctrl+C)
+  if [[ -z "${GHUL_SESSION_ID:-}" ]]; then
+    return 0
+  fi
+  
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "[GHUL] Warning: curl not available, cannot notify server about abort" >&2
+    return 0
+  fi
+  
+  local reason="${1:-user_abort}"
+  local payload
+  payload="$(printf '{"session_id":"%s","status":"aborted","reason":"%s"}' \
+    "$GHUL_SESSION_ID" "$reason")"
+  
+  local response
+  response="$(curl -sS -X POST "${API_BASE}/finalize" \
+    -H "Content-Type: application/json" \
+    -d "$payload" 2>&1)"
+  
+  local status
+  status="$(echo "$response" | jq -r '.status // empty' 2>/dev/null || echo "")"
+  
+  if [[ "$status" == "ok" ]]; then
+    local deleted
+    deleted="$(echo "$response" | jq -r '.deleted // "false"' 2>/dev/null || echo "false")"
+    if [[ "$deleted" == "true" ]]; then
+      printf '\033[31m%s\033[0m\n' "[GHUL] Upload aborted, all tests deleted on server"
+    else
+      printf '\033[31m%s\033[0m\n' "[GHUL] Upload aborted on server"
+    fi
+  else
+    echo "[GHUL] Warning: Failed to notify server about abort" >&2
+    echo "$response" | jq . >&2 2>/dev/null || echo "$response" >&2
+  fi
 }
 
 # ---------- Step Notification Function -----------------------------------------

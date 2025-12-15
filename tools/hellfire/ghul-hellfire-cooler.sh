@@ -90,15 +90,10 @@ main() {
   # Print start message
   echo
   echo "🔥 You have been warned."
-  echo
   echo "Proceeding with GHUL Hellfire Cooler Test…"
-  echo
   echo "This test will turn your entire system into a furnace."
   echo "All components will be stressed simultaneously."
-  echo
-  echo "Good luck, brave warrior."
-  echo
-  echo "🔥🔥🔥"
+  echo "May the force be with you."
   echo
   
   # Print header
@@ -243,6 +238,8 @@ main() {
   start_time="$(date +%s)"
   local end_time
   end_time=$((start_time + DURATION))
+  local cooler_status_reason=""
+  local cooler_failed=0
   
   green "  Test running... (${DURATION} seconds)"
   echo
@@ -252,14 +249,20 @@ main() {
     # Check if any critical process died
     if [[ -n "$cpu_pid" ]] && ! kill -0 "$cpu_pid" 2>/dev/null; then
       yellow "  CPU stress process ended early"
+      cooler_failed=1
+      cooler_status_reason="CPU stress terminated early (before ${DURATION}s)"
       break
     fi
     if [[ -n "$ram_pid" ]] && ! kill -0 "$ram_pid" 2>/dev/null; then
       yellow "  RAM stress process ended early"
+      cooler_failed=1
+      cooler_status_reason="RAM stress terminated early (before ${DURATION}s)"
       break
     fi
     if [[ -n "$gpu_pid" ]] && ! kill -0 "$gpu_pid" 2>/dev/null; then
       yellow "  GPU stress process ended early"
+      cooler_failed=1
+      cooler_status_reason="GPU stress (FurMark) terminated early (before ${DURATION}s). Likely window closed or crash; GPU load not sustained."
       break
     fi
     sleep 1
@@ -303,6 +306,13 @@ main() {
     wait "$disk_pid" 2>/dev/null || true
   fi
   
+  # If GPU died early and no safety stop was triggered, mark as failed
+  if [[ $cooler_failed -eq 1 ]] && [[ -n "$gpu_pid" ]] && ! kill -0 "$gpu_pid" 2>/dev/null; then
+    export HELLFIRE_COOLER_SAFETY_FAILED=1
+    export HELLFIRE_COOLER_SAFETY_REASON="${cooler_status_reason}"
+    red "  🚨 EARLY TERMINATION: ${cooler_status_reason}"
+  fi
+  
   # Kill any remaining stress-ng processes
   killall stress-ng 2>/dev/null || true
   
@@ -311,12 +321,17 @@ main() {
   wait "$monitor_pid" 2>/dev/null || true
   
   # Check test status
+  local abort_msg_printed=0
   if [[ -n "${HELLFIRE_USER_ABORTED:-}" ]]; then
-    exit 0  # Handled by cleanup trap
+    test_status="FAILED"
+    abort_reason="User aborted (Ctrl+C)"
+    red "  Test aborted by user (Ctrl+C)"
+    abort_msg_printed=1
   elif [[ -n "${HELLFIRE_COOLER_SAFETY_FAILED:-}" ]]; then
     test_status="FAILED"
     abort_reason="${HELLFIRE_COOLER_SAFETY_REASON:-Cooler Safety Stop triggered}"
     red "  Test aborted due to safety stop"
+    abort_msg_printed=1
   else
     green "  Test completed successfully"
   fi
@@ -324,9 +339,12 @@ main() {
   # Stop sensor monitoring
   stop_sensor_monitor "$HELLFIRE_TEST_NAME"
   
-  # Print summary (only if not aborted by user)
-  if [[ -z "${HELLFIRE_USER_ABORTED:-}" ]]; then
-    print_cooler_summary "$HELLFIRE_TEST_NAME" "$DURATION" "$test_status" "$abort_reason"
+  # Print summary
+  print_cooler_summary "$HELLFIRE_TEST_NAME" "$DURATION" "$test_status" "$abort_reason"
+  
+  # Exit with error code if test failed
+  if [[ "$test_status" == "FAILED" || "$test_status" == "ABORTED" || -n "${HELLFIRE_COOLER_SAFETY_FAILED:-}" ]]; then
+    exit 1
   fi
 }
 

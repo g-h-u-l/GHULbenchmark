@@ -85,14 +85,9 @@ main() {
   
   echo
   echo "🔥 You have been warned."
-  echo
   echo "Proceeding with GHUL Hellfire…"
-  echo
   echo "This test can kill your GPU in a life-threatening way."
-  echo
-  echo "Good luck, brave warrior."
-  echo
-  echo "🔥🔥🔥"
+  echo "May the force be with you."
   echo
   
   print_hellfire_header "GPU STRESS TEST"
@@ -166,6 +161,7 @@ main() {
       > "${LOGDIR}/$(get_timestamp)-${HOST}-gpu-stress.log" 2>&1 &
     stress_pid=$!
     export STRESS_PID="$stress_pid"
+    export GPUTEST_PID="$stress_pid"
     green "  GpuTest FurMark started (PID: $stress_pid)"
     green "  Test will run for ${DURATION} seconds, then be terminated"
   else
@@ -189,21 +185,34 @@ main() {
     start_time="$(date +%s)"
     local end_time
     end_time=$((start_time + DURATION))
+    local status_file="${LOGDIR}/.gpu_safety_status_${HELLFIRE_TEST_NAME}"
+    local early_exit_detected=0
     
     # Wait for duration or until process dies (or safety stop)
     while [[ $(date +%s) -lt $end_time ]]; do
       # Check if safety stop was triggered
-      local status_file="${LOGDIR}/.gpu_safety_status_${HELLFIRE_TEST_NAME}"
       if [[ -f "$status_file" ]]; then
         # Safety stop triggered - break immediately
         break
       fi
       if ! kill -0 "$stress_pid" 2>/dev/null; then
-        # Process already died
+        # Process already died (user closed window or crash)
+        early_exit_detected=1
         break
       fi
       sleep 1
     done
+    
+    # If process ended before duration without a safety file, mark as failed/user abort
+    if [[ $early_exit_detected -eq 1 ]] && [[ ! -f "$status_file" ]]; then
+      local elapsed
+      elapsed=$(( $(date +%s) - start_time ))
+      export HELLFIRE_GPU_SAFETY_FAILED=1
+      export HELLFIRE_GPU_SAFETY_REASON="GpuTest (FurMark) terminated early at ${elapsed}s (< ${DURATION}s). Likely window closed or crash; GPU load not sustained."
+      echo "FAILED" > "$status_file"
+      echo "${HELLFIRE_GPU_SAFETY_REASON}" > "${status_file}.reason"
+      red "  🚨 EARLY TERMINATION: FurMark stopped after ${elapsed}s (< ${DURATION}s)."
+    fi
     
     # Kill the process if it's still running (more aggressively)
     if kill -0 "$stress_pid" 2>/dev/null; then
@@ -246,6 +255,7 @@ main() {
   wait "$monitor_pid" 2>/dev/null || true
   
   # Check test status (read from status file if available, fallback to env var)
+  local abort_msg_printed=0
   local status_file="${LOGDIR}/.gpu_safety_status_${HELLFIRE_TEST_NAME}"
   if [[ -f "$status_file" ]]; then
     local safety_status
@@ -260,6 +270,7 @@ main() {
       export HELLFIRE_GPU_SAFETY_FAILED=1
       export HELLFIRE_GPU_SAFETY_REASON="$abort_reason"
       red "  Test aborted due to GPU safety stop"
+      abort_msg_printed=1
       # Clean up status file
       rm -f "$status_file" "${status_file}.reason" 2>/dev/null || true
     fi
@@ -267,11 +278,15 @@ main() {
   
   # Check test status (fallback to env var)
   if [[ -n "${HELLFIRE_USER_ABORTED:-}" ]]; then
-    exit 0  # Handled by cleanup trap
+    test_status="FAILED"
+    abort_reason="User aborted (Ctrl+C)"
+    red "  Test aborted by user (Ctrl+C)"
   elif [[ -n "${HELLFIRE_GPU_SAFETY_FAILED:-}" ]]; then
     test_status="FAILED"
     abort_reason="${HELLFIRE_GPU_SAFETY_REASON:-Hellfire Safety Stop triggered}"
-    red "  Test aborted due to GPU safety stop"
+    if [[ $abort_msg_printed -eq 0 ]]; then
+      red "  Test aborted due to GPU safety stop"
+    fi
     # Don't show "Test completed successfully" for safety stops
   else
     green "  Test completed successfully"
@@ -279,8 +294,11 @@ main() {
   
   stop_sensor_monitor "$HELLFIRE_TEST_NAME"
   
-  if [[ -z "${HELLFIRE_USER_ABORTED:-}" ]]; then
-    print_test_summary "$HELLFIRE_TEST_NAME" "$DURATION" "$test_status" "$abort_reason"
+  print_test_summary "$HELLFIRE_TEST_NAME" "$DURATION" "$test_status" "$abort_reason"
+  
+  # Exit with error code if test failed
+  if [[ "$test_status" == "FAILED" || "$test_status" == "ABORTED" || -n "${HELLFIRE_GPU_SAFETY_FAILED:-}" ]]; then
+    exit 1
   fi
 }
 

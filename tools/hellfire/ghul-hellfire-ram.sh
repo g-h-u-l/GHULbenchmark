@@ -84,14 +84,9 @@ main() {
   # Print start message
   echo
   echo "🔥 You have been warned."
-  echo
   echo "Proceeding with GHUL Hellfire…"
-  echo
   echo "This test can push your RAM to the absolute limit."
-  echo
-  echo "Good luck, brave warrior."
-  echo
-  echo "🔥🔥🔥"
+  echo "May the force be with you."
   echo
   
   # Print header
@@ -134,13 +129,15 @@ main() {
     # vm stress: Virtual memory stress (allocates and touches memory)
     # vm-bytes: Amount of memory to allocate (in bytes)
     # vm-keep: Keep memory allocated (don't free immediately)
+    local log_file="${LOGDIR}/$(get_timestamp)-${HOST}-ram-stress.log"
     stress-ng \
       --vm "$(nproc)" \
       --vm-bytes "${ram_test_kb}K" \
       --vm-keep \
       --timeout "${DURATION}s" \
       --metrics-brief \
-      --log-file "${LOGDIR}/$(get_timestamp)-${HOST}-ram-stress.log" &
+      --log-file "$log_file" \
+      >"$log_file" 2>&1 &
     
     STRESS_PID=$!
     green "  stress-ng started (PID: $STRESS_PID)"
@@ -154,8 +151,9 @@ main() {
     local abort_reason=""
     
     if [[ -n "${HELLFIRE_USER_ABORTED:-}" ]]; then
-      # User abort was handled by cleanup handler
-      exit 0
+      test_status="FAILED"
+      abort_reason="User aborted (Ctrl+C)"
+      red "  Test aborted by user (Ctrl+C)"
     else
       green "  Test completed successfully"
     fi
@@ -168,9 +166,12 @@ main() {
   # Stop sensor monitoring
   stop_sensor_monitor "$HELLFIRE_TEST_NAME"
   
-  # Print summary (only if not aborted by user)
-  if [[ -z "${HELLFIRE_USER_ABORTED:-}" ]]; then
-    print_test_summary "$HELLFIRE_TEST_NAME" "$DURATION" "$test_status" "$abort_reason"
+  # Print summary
+  print_test_summary "$HELLFIRE_TEST_NAME" "$DURATION" "$test_status" "$abort_reason"
+  
+  # Exit with error code if failed
+  if [[ "$test_status" == "FAILED" || "$test_status" == "ABORTED" ]]; then
+    exit 1
   fi
 }
 

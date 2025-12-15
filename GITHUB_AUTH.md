@@ -1,23 +1,23 @@
-# GitHub Authentifizierung für Upload
+# GitHub authentication for uploads
 
-## Option 1: GitHub CLI (empfohlen - am einfachsten)
+## Option 1: GitHub CLI (recommended - easiest)
 
 ```bash
-# Installieren (falls nicht vorhanden)
+# Install (if not present)
 sudo pacman -S github-cli
 
-# Einloggen
+# Login
 gh auth login
 
-# Folgt den Anweisungen:
-# - GitHub.com wählen
-# - HTTPS wählen
+# Follow the prompts:
+# - Select GitHub.com
+# - Select HTTPS
 # - Authenticate Git with your GitHub credentials? → Yes
 # - Login with a web browser → Yes
-# - Copy den Code und öffne den Link im Browser
+# - Copy the code and open the link in your browser
 ```
 
-Nach dem Login kannst du normal pushen:
+After login you can push as usual:
 ```bash
 git push -u origin main
 git push origin v0.1
@@ -25,35 +25,35 @@ git push origin v0.1
 
 ## Option 2: Personal Access Token (PAT)
 
-1. Gehe zu: https://github.com/settings/tokens
+1. Go to: https://github.com/settings/tokens
 2. "Generate new token" → "Generate new token (classic)"
-3. Name: z.B. "GHULbenchmark Upload"
-4. Scopes: `repo` (vollständiger Zugriff auf Repositories)
-5. "Generate token" klicken
-6. **Token kopieren** (wird nur einmal angezeigt!)
+3. Name: e.g. "GHULbenchmark Upload"
+4. Scopes: `repo` (full access to repositories)
+5. Click "Generate token"
+6. **Copy the token** (it is only shown once!)
 
-Dann beim ersten Push:
+Then on the first push:
 ```bash
 git push -u origin main
-# Username: dein-github-username
-# Password: <paste-token-hier>
+# Username: your-github-username
+# Password: <paste-token-here>
 ```
 
-Git kann das Token dann speichern (mit `git config --global credential.helper store`).
+Git can store the token (with `git config --global credential.helper store`).
 
-## Option 3: SSH Key (für fortgeschrittene)
+## Option 3: SSH key (advanced)
 
-Falls du bereits einen SSH-Key bei GitHub hinterlegt hast:
+If you already have an SSH key registered with GitHub:
 ```bash
-# Remote auf SSH umstellen
+# Switch remote to SSH
 git remote set-url origin git@github.com:g-h-u-l/GHULbenchmark.git
 
-# Dann normal pushen
+# Then push as usual
 git push -u origin main
 ```
 
-## Empfehlung
+## Recommendation
 
-**GitHub CLI** ist am einfachsten - einmal `gh auth login` und fertig!
+**GitHub CLI** is the easiest – run `gh auth login` once and you are done!
 
 
