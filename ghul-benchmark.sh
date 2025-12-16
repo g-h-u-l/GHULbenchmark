@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.4.2"
+GHUL_VERSION="0.4.3"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -566,6 +566,36 @@ if [[ -z "${cpu_model}" ]]; then
 fi
 cpu_model="${cpu_model:-unknown}"
 
+# CPU socket type (from dmidecode, requires root or dmidecode permissions)
+# Fallback: read from .ghul_host_id.json (set by firstrun.sh)
+cpu_socket="unknown"
+if have dmidecode; then
+  # Try to get socket designation from dmidecode -t processor
+  # This requires root, but we try anyway (may fail gracefully)
+  cpu_socket="$(sudo dmidecode -t processor 2>/dev/null | awk -F: '
+    /Socket Designation/ {
+      gsub(/^[ \t]+|[ \t]+$/, "", $2);
+      print $2;
+      exit
+    }' || echo "unknown")"
+  # Fallback: try Upgrade field if Socket Designation is empty
+  if [[ -z "$cpu_socket" || "$cpu_socket" == "unknown" ]]; then
+    cpu_socket="$(sudo dmidecode -t processor 2>/dev/null | awk -F: '
+      /Upgrade/ {
+        gsub(/^[ \t]+|[ \t]+$/, "", $2);
+        # Remove "Socket " prefix if present
+        sub(/^Socket[ \t]+/, "", $2);
+        print $2;
+        exit
+      }' || echo "unknown")"
+  fi
+fi
+# Final fallback: read from .ghul_host_id.json (set by firstrun.sh with root)
+if [[ "$cpu_socket" == "unknown" && -f "${HOST_ID_FILE}" ]]; then
+  cpu_socket="$(jq -r '.cpu_socket // "unknown"' "${HOST_ID_FILE}" 2>/dev/null || echo "unknown")"
+fi
+cpu_socket="${cpu_socket:-unknown}"
+
 threads="$(cap nproc)"; threads="${threads:-0}"
 mem_total_kib="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"; mem_total_kib="${mem_total_kib:-0}"
 
@@ -683,6 +713,7 @@ ENV_JSON="$(jq -n \
   --arg kernel   "$kernel" \
   --arg os       "$os" \
   --arg cpu      "$cpu_model" \
+  --arg cpu_sock "$cpu_socket" \
   --arg gpu_rend "$gpu_renderer" \
   --arg gl       "$opengl_version" \
   --arg mb_man   "$mb_man" \
@@ -703,6 +734,7 @@ ENV_JSON="$(jq -n \
      kernel:          $kernel,
      os:              $os,
      cpu:             $cpu,
+     cpu_socket:      $cpu_sock,
      threads:         $threads,
      mem_total_kib:   $mem_kib,
      mainboard: {

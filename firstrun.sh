@@ -191,6 +191,36 @@ read_mainboard_fields() {
   MAINBOARD_SERIAL="${serial}"
 }
 
+read_cpu_socket() {
+  # Requires root (dmidecode). We assume firstrun root mode here.
+  # Extracts CPU socket type from dmidecode -t processor
+  local socket="unknown"
+
+  if have dmidecode; then
+    # Try Socket Designation first
+    socket="$(dmidecode -t processor 2>/dev/null | awk -F: '
+      /Socket Designation/ {
+        gsub(/^[ \t]+|[ \t]+$/, "", $2);
+        print $2;
+        exit
+      }' || echo "unknown")"
+    
+    # Fallback: try Upgrade field if Socket Designation is empty
+    if [[ -z "$socket" || "$socket" == "unknown" ]]; then
+      socket="$(dmidecode -t processor 2>/dev/null | awk -F: '
+        /Upgrade/ {
+          gsub(/^[ \t]+|[ \t]+$/, "", $2);
+          # Remove "Socket " prefix if present
+          sub(/^Socket[ \t]+/, "", $2);
+          print $2;
+          exit
+        }' || echo "unknown")"
+    fi
+  fi
+
+  CPU_SOCKET="${socket}"
+}
+
 json_get_field() {
   # Very small ad-hoc JSON parser for our simple one-line JSON.
   # Usage: json_get_field KEY FILE
@@ -205,6 +235,7 @@ write_host_id_json() {
   local serial="$3"
   local id="$4"
   local fan_status="${5:-unknown}"
+  local cpu_socket="${6:-unknown}"
 
   cat > "${HOST_ID_FILE}" <<EOF
 {
@@ -212,7 +243,8 @@ write_host_id_json() {
   "product": "${product}",
   "serial": "${serial}",
   "id": "${id}",
-  "fan_status": "${fan_status}"
+  "fan_status": "${fan_status}",
+  "cpu_socket": "${cpu_socket}"
 }
 EOF
 }
@@ -314,6 +346,10 @@ ensure_host_id_root_mode() {
   local new_product="${MAINBOARD_PRODUCT}"
   local new_serial="${MAINBOARD_SERIAL}"
 
+  # Get CPU socket information
+  read_cpu_socket
+  local new_cpu_socket="${CPU_SOCKET}"
+
   # Check fan availability
   local fan_status
   fan_status="$(check_fan_availability)"
@@ -323,7 +359,7 @@ ensure_host_id_root_mode() {
     local new_id
     new_id="$(generate_host_id_from_board "${new_vendor}" "${new_product}" "${new_serial}")"
     HOST_ID="${new_id}"
-    write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}"
+    write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}" "${new_cpu_socket}"
 
     echo "    Mainboard vendor : ${new_vendor}"
     echo "    Mainboard product: ${new_product}"
@@ -346,12 +382,19 @@ ensure_host_id_root_mode() {
   fi
 
   # JSON file exists: read old values
-  local old_vendor old_product old_serial old_id old_fan_status
+  local old_vendor old_product old_serial old_id old_fan_status old_cpu_socket
   old_vendor="$(json_get_field "vendor"  "${HOST_ID_FILE}")"
   old_product="$(json_get_field "product" "${HOST_ID_FILE}")"
   old_serial="$(json_get_field "serial"  "${HOST_ID_FILE}")"
   old_id="$(json_get_field "id"      "${HOST_ID_FILE}")"
   old_fan_status="$(json_get_field "fan_status" "${HOST_ID_FILE}" || echo "unknown")"
+  old_cpu_socket="$(json_get_field "cpu_socket" "${HOST_ID_FILE}" || echo "unknown")"
+  
+  # Use new socket if available, otherwise keep old one
+  local cpu_socket_to_use="${new_cpu_socket}"
+  if [[ "$cpu_socket_to_use" == "unknown" && "$old_cpu_socket" != "unknown" ]]; then
+    cpu_socket_to_use="${old_cpu_socket}"
+  fi
 
   # If vendor+product are unchanged → keep ID, even if serial changed
   if [[ "${old_vendor}" == "${new_vendor}" && "${old_product}" == "${new_product}" ]]; then
@@ -366,11 +409,11 @@ ensure_host_id_root_mode() {
     local serial_msg=""
     if [[ -n "${new_serial}" && "${new_serial}" != "unknown" && "${new_serial}" != "${old_serial}" ]]; then
       # Same board type, but different unit (new identical motherboard)
-      write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}"
+      write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}" "${cpu_socket_to_use}"
       serial_msg="New, identical motherboard detected. ID change NOT needed."
     else
-      # Update fan_status in existing file if it changed
-      write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}"
+      # Update fan_status and cpu_socket in existing file if they changed
+      write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}" "${cpu_socket_to_use}"
     fi
 
     echo "    Mainboard vendor : ${new_vendor}"
@@ -400,7 +443,7 @@ ensure_host_id_root_mode() {
   local new_id
   new_id="$(generate_host_id_from_board "${new_vendor}" "${new_product}" "${new_serial}")"
   HOST_ID="${new_id}"
-  write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}"
+  write_host_id_json "${new_vendor}" "${new_product}" "${new_serial}" "${HOST_ID}" "${fan_status}" "${new_cpu_socket}"
 
   echo "    Previous board:"
   echo "      vendor : ${old_vendor}"
@@ -654,6 +697,17 @@ generate_cpuinfo_log() {
   echo
 }
 
+generate_processor_log() {
+  echo "[*] Generating processor.log (dmidecode -t processor)..."
+  if have dmidecode; then
+    dmidecode -t processor > "${LOGDIR}/processor.log" 2>/dev/null || true
+    green "    → ${LOGDIR}/processor.log"
+  else
+    yellow "    → dmidecode not available, skipping processor.log"
+  fi
+  echo
+}
+
 generate_gpuinfo_log() {
   echo "[*] Generating gpuinfo.log (lspci + glxinfo -B if available)..."
   {
@@ -677,6 +731,7 @@ generate_all_logs_root_mode() {
   generate_dmidecode_log
   generate_mainboard_log
   generate_cpuinfo_log
+  generate_processor_log
   generate_gpuinfo_log
   green "[✓] All hardware logs generated."
   echo
@@ -774,6 +829,7 @@ check_logs_presence() {
     "dmidecode.log"
     "mainboard.log"
     "cpuinfo.log"
+    "processor.log"
     "gpuinfo.log"
   )
 

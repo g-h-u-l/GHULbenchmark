@@ -164,6 +164,40 @@ sign_file() {
   echo "$sig_b64"
 }
 
+# Sign a hex-encoded challenge using the user's private key
+sign_challenge_hex() {
+  local challenge_hex="$1"
+  local tmp_file
+  tmp_file="$(mktemp)"
+
+  # Convert hex string to raw bytes
+  if command -v xxd >/dev/null 2>&1; then
+    if ! printf '%s' "$challenge_hex" | xxd -r -p >"$tmp_file" 2>/dev/null; then
+      echo "[GHUL] Error: Failed to convert challenge hex to bytes (xxd failed)" >&2
+      rm -f "$tmp_file"
+      return 1
+    fi
+  else
+    # Fallback ohne xxd: Hex in \xHH-Sequenzen wandeln und mit printf schreiben
+    local bytes
+    bytes="$(printf '%s' "$challenge_hex" | sed 's/../\\x&/g')"
+    if ! printf '%b' "$bytes" >"$tmp_file" 2>/dev/null; then
+      echo "[GHUL] Error: Failed to convert challenge hex to bytes (fallback failed)" >&2
+      rm -f "$tmp_file"
+      return 1
+    fi
+  fi
+
+  local sig_b64
+  sig_b64="$(sign_file "$tmp_file")" || {
+    rm -f "$tmp_file"
+    return 1
+  }
+
+  rm -f "$tmp_file"
+  echo "$sig_b64"
+}
+
 # ---------- API Functions ------------------------------------------------------
 
 api_handshake() {
@@ -186,11 +220,19 @@ api_handshake() {
     hellfire_mode="default"
   fi
   
+  # Ensure USER_PUB is available (should be set by ensure_user_identity)
+  if [[ -z "${USER_PUB:-}" ]]; then
+    echo "[GHUL] Error: user_pub not available" >&2
+    return 1
+  fi
+  
+  # -------- Phase 1: Handshake → Challenge -------------------------------------
   local response
   response="$(curl -sS -X POST "${API_BASE}/handshake" \
     -H "Content-Type: application/json" \
     -d "{
       \"user_id\": \"${USER_ID}\",
+      \"user_pub\": \"${USER_PUB}\",
       \"host_id\": \"${HOST_ID}\",
       \"hostname\": \"${hostname}\",
       \"run_stamp\": \"${run_stamp}\",
@@ -207,21 +249,124 @@ api_handshake() {
   # Check for access-denied
   if [[ "$status" == "access-denied" ]]; then
     local reason
-    reason="$(echo "$response" | jq -r '.error // "not ready for public participation"' 2>/dev/null || echo "not ready for public participation")"
+    reason="$(echo "$response" | jq -r '.error // \"not ready for public participation\"' 2>/dev/null || echo \"not ready for public participation\")"
     echo "[GHUL] Access denied: $reason" >&2
     echo "[GHUL] Uploads are currently restricted. Exit" >&2
     return 2  # Special exit code for access-denied
   fi
-  
-  local session_id
-  session_id="$(echo "$response" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
-  
-  if [[ -z "$session_id" ]]; then
-    echo "[GHUL] Error: Handshake failed" >&2
+
+  # Backwards-compatibility: older server might still return session_id directly
+  if [[ "$status" == "ok" ]]; then
+    local direct_session_id
+    direct_session_id="$(echo "$response" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
+    if [[ -n "$direct_session_id" ]]; then
+      echo "$direct_session_id"
+      return 0
+    fi
+  fi
+
+  # New protocol: expect a challenge
+  if [[ "$status" != "challenge" ]]; then
+    echo "[GHUL] Error: Handshake failed (unexpected status: $status)" >&2
     echo "$response" | jq . >&2 || echo "$response" >&2
     return 1
   fi
-  
+
+  local challenge proposed_user_id
+  challenge="$(echo "$response" | jq -r '.challenge // empty' 2>/dev/null || echo "")"
+  proposed_user_id="$(echo "$response" | jq -r '.proposed_user_id // empty' 2>/dev/null || echo "")"
+
+  if [[ -z "$challenge" || -z "$proposed_user_id" ]]; then
+    echo "[GHUL] Error: Handshake challenge missing data" >&2
+    echo "$response" | jq . >&2 || echo "$response" >&2
+    return 1
+  fi
+
+  echo "[API] handshake initialized, sending challenge: ${challenge}" >&2
+  echo "[GHUL] signing challenge with local user_master..." >&2
+
+  # Sign the challenge (hex → bytes → sign → base64)
+  local challenge_sig
+  challenge_sig="$(sign_challenge_hex "$challenge")" || {
+    echo "[GHUL] Error: Failed to sign challenge" >&2
+    return 1
+  }
+
+  # -------- Phase 2: /handshake-verify -----------------------------------------
+  local verify_payload
+  verify_payload="$(printf '{
+    \"user_pub\": \"%s\",
+    \"user_id\": \"%s\",
+    \"challenge\": \"%s\",
+    \"signature\": \"%s\",
+    \"host_id\": \"%s\",
+    \"hostname\": \"%s\",
+    \"run_stamp\": \"%s\",
+    \"share\": true,
+    \"hellfire\": %s,
+    \"insane\": %s,
+    \"hellfire_mode\": \"%s\",
+    \"ghul_version\": \"%s\"
+  }' \
+    "$USER_PUB" "$USER_ID" "$challenge" "$challenge_sig" \
+    "$HOST_ID" "$hostname" "$run_stamp" \
+    "$hellfire_flag" "$insane_flag" "$hellfire_mode" "${GHUL_VERSION:-0.3.2}")"
+
+  local verify_response
+  verify_response="$(curl -sS -X POST "${API_BASE}/handshake-verify" \
+    -H "Content-Type: application/json" \
+    -d "$verify_payload" 2>&1)"
+
+  local verify_status
+  verify_status="$(echo "$verify_response" | jq -r '.status // empty' 2>/dev/null || echo "")"
+
+  if [[ "$verify_status" == "identity-theft" ]]; then
+    local suspension
+    suspension="$(echo "$verify_response" | jq -r '.suspension_seconds // 0' 2>/dev/null || echo 0)"
+    echo "[API] Identity theft detected. One-hour suspension." >&2
+    echo "$verify_response" | jq . >&2 || echo "$verify_response" >&2
+    return 1
+  fi
+
+  if [[ "$verify_status" != "ok" ]]; then
+    echo "[GHUL] Error: Handshake verification failed" >&2
+    echo "$verify_response" | jq . >&2 || echo "$verify_response" >&2
+    return 1
+  fi
+
+  local session_id canonical_user_id
+  session_id="$(echo "$verify_response" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
+  canonical_user_id="$(echo "$verify_response" | jq -r '.user_id // empty' 2>/dev/null || echo "")"
+
+  if [[ -z "$session_id" ]]; then
+    echo "[GHUL] Error: Handshake verification returned no session_id" >&2
+    echo "$verify_response" | jq . >&2 || echo "$verify_response" >&2
+    return 1
+  fi
+
+  # Update local identity file if server chose a different canonical user_id
+  if [[ -n "$canonical_user_id" && "$canonical_user_id" != "$USER_ID" ]]; then
+    local backup_file tmp_file
+    backup_file="${USER_ID_FILE}.bak-$(date +%s)"
+    tmp_file="$(mktemp)"
+
+    cp "$USER_ID_FILE" "$backup_file" 2>/dev/null || true
+
+    if jq --arg uid "$canonical_user_id" '.user_id = $uid' "$USER_ID_FILE" >"$tmp_file" 2>/dev/null; then
+      mv "$tmp_file" "$USER_ID_FILE"
+      chmod 600 "$USER_ID_FILE" 2>/dev/null || true
+      USER_ID="$canonical_user_id"
+      echo "[GHUL] Server assigned new canonical user_id: ${canonical_user_id}" >&2
+      echo "[GHUL] Local identity file updated to match server." >&2
+    else
+      echo "[GHUL] Warning: Failed to update local user identity file" >&2
+      rm -f "$tmp_file"
+    fi
+  else
+    echo "[API] identity of user [${USER_ID}] ensured" >&2
+    echo "[GHUL] using canonical user_id: ${USER_ID}" >&2
+  fi
+
   echo "$session_id"
 }
 
