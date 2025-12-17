@@ -56,22 +56,20 @@ detect_distro() {
 
 is_arch_like() {
   if command -v pacman >/dev/null 2>&1; then
-    [[ "${DISTRO_ID}" =~ (arch|manjaro|endeavouros) || "${DISTRO_LIKE}" == *arch* ]]
+    [[ "${DISTRO_ID}" =~ (arch|manjaro|endeavouros|cachyos) || "${DISTRO_LIKE}" == *arch* ]]
   else
     return 1
   fi
 }
 
-# Check if AUR helper (pamac or yay) is available
+# Check if AUR helper (yay) is available
 has_aur_helper() {
-  command -v pamac >/dev/null 2>&1 || command -v yay >/dev/null 2>&1
+  command -v yay >/dev/null 2>&1
 }
 
-# Get AUR helper command (pamac or yay)
+# Get AUR helper command (yay)
 get_aur_helper() {
-  if command -v pamac >/dev/null 2>&1; then
-    echo "pamac"
-  elif command -v yay >/dev/null 2>&1; then
+  if command -v yay >/dev/null 2>&1; then
     echo "yay"
   else
     return 1
@@ -96,6 +94,7 @@ CORE_CMDS=(
   "fio"
   "smartctl"
   "nvme"
+  "bc"
 )
 
 CORE_PKGS=(
@@ -113,6 +112,7 @@ CORE_PKGS=(
   "fio"            # fio
   "smartmontools"  # smartctl
   "nvme-cli"       # nvme (for NVMe temperature reading)
+  "bc"             # bc (calculator for floating point math in scripts)
 )
 
 # AUR packages (require AUR helper: pamac or yay)
@@ -137,6 +137,104 @@ if [[ ${#AUR_CMDS[@]} -ne ${#AUR_PKGS[@]} ]]; then
   exit 1
 fi
 
+# ----- GPU Hybrid Graphics Detection ------------------------------------------
+
+check_hybrid_graphics() {
+  echo "[*] Checking for hybrid graphics setup:"
+  echo
+  
+  local gpu_count=0
+  local has_nvidia=0
+  local has_amd=0
+  local has_intel=0
+  local gpu_list=""
+  
+  if command -v lspci >/dev/null 2>&1; then
+    gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
+    gpu_count="$(echo "$gpu_list" | grep -c . || echo 0)"
+    
+    if echo "$gpu_list" | grep -qi 'NVIDIA'; then
+      has_nvidia=1
+    fi
+    # Check for AMD/ATI GPUs (be more specific to avoid false matches like "Corporation")
+    # Match AMD/ATI/Radeon as separate words, not as part of other words
+    if echo "$gpu_list" | grep -qiE '\bAMD\b.*\[|ATI\b.*\[|\bRadeon\b'; then
+      has_amd=1
+    fi
+    if echo "$gpu_list" | grep -qi 'Intel'; then
+      has_intel=1
+    fi
+  fi
+  
+  if [[ $gpu_count -le 1 ]]; then
+    echo "    Single GPU detected (no hybrid graphics)"
+    echo
+    return 0
+  fi
+  
+  echo "    Multiple GPUs detected: ${gpu_count}"
+  echo "$gpu_list" | while IFS= read -r line; do
+    [[ -n "$line" ]] && echo "      - $line"
+  done
+  echo
+  
+  # Check for NVIDIA Optimus (prime-run)
+  if [[ $has_nvidia -eq 1 ]]; then
+    if command -v prime-run >/dev/null 2>&1; then
+      green "    ✓ prime-run available (NVIDIA Optimus support)"
+      echo "      GPU benchmarks will automatically use the NVIDIA GPU"
+    else
+      yellow "    ⚠ prime-run not found (NVIDIA Optimus)"
+      echo "      Install: pacman -S nvidia-prime"
+      echo "      Without prime-run, GPU tests may run on the integrated GPU"
+    fi
+    echo
+  fi
+  
+  # Check for AMD hybrid (DRI_PRIME)
+  # Only check if we actually have both AMD and Intel GPUs
+  if [[ $has_amd -eq 1 && $has_intel -eq 1 ]]; then
+    # First verify AMD GPU is actually present in lspci output
+    # Use word boundaries to avoid false matches like "Corporation" containing "ATI"
+    local amd_in_lspci=0
+    if echo "$gpu_list" | grep -qiE '\bAMD\b|\bATI\b|\bRadeon\b'; then
+      amd_in_lspci=1
+    fi
+    
+    if [[ $amd_in_lspci -eq 1 ]]; then
+      # Check if DRI_PRIME would work (check for AMD card in /sys/class/drm)
+      local amd_card_found=0
+      if [[ -d /sys/class/drm ]]; then
+        for card in /sys/class/drm/card*/device/vendor; do
+          if [[ -r "$card" ]]; then
+            vendor_hex="$(cat "$card" 2>/dev/null || echo "")"
+            # AMD vendor ID is 0x1002
+            if [[ "$vendor_hex" == "0x1002" ]]; then
+              amd_card_found=1
+              break
+            fi
+          fi
+        done
+      fi
+      
+      if [[ $amd_card_found -eq 1 ]]; then
+        green "    ✓ AMD hybrid graphics detected"
+        echo "      GPU benchmarks will automatically use DRI_PRIME=1 for AMD GPU"
+      else
+        yellow "    ⚠ AMD GPU detected but not accessible via /sys/class/drm"
+        echo "      DRI_PRIME=1 may not work correctly"
+      fi
+      echo
+    fi
+  fi
+  
+  if [[ $has_nvidia -eq 0 && $has_amd -eq 0 ]]; then
+    echo "    Multiple GPUs detected but no dedicated GPU found"
+    echo "    (likely multiple integrated GPUs or unknown configuration)"
+    echo
+  fi
+}
+
 # ----- is it Arch based or what type of Linux machine we have here? -----------
 
 # output the info that GHULbench was made for an arch based  rolling release
@@ -144,12 +242,20 @@ detect_distro
 echo "Detected distro: ${DISTRO_ID} (like: ${DISTRO_LIKE})"
 echo
 
+# Check for hybrid graphics (before dependency check, no root needed)
+check_hybrid_graphics
+
 if ! is_arch_like; then
   yellow "[!] GHUL firstrun was developed and tested on Arch-based systems (Manjaro, Arch, ...)."
   echo "    Automatic installation is disabled on this distro."
   echo
   echo "    You need the following tools (package names are Arch-style, but good hints):"
-  printf '      - %s\n' "${DEP_PKGS[@]}"
+  echo
+  echo "    Core packages (via pacman):"
+  printf '      - %s\n' "${CORE_PKGS[@]}"
+  echo
+  echo "    AUR packages (via pamac/yay):"
+  printf '      - %s\n' "${AUR_PKGS[@]}"
   echo
   exit 1
 fi
@@ -502,7 +608,7 @@ check_deps_user_mode() {
     if have "$cmd"; then
       printf "  [\e[32m✓\e[0m] %-10s (command: %s) [AUR]\n" "$pkg" "$cmd"
     else
-      printf "  [ ] %-10s (command: %s)  → install with: %s -S %s [AUR]\n" "$pkg" "$cmd" "$(get_aur_helper 2>/dev/null || echo 'pamac/yay')" "$pkg"
+      printf "  [ ] %-10s (command: %s)  → install with: yay -S %s [AUR]\n" "$pkg" "$cmd" "$pkg"
       missing_aur=1
       suggest_aur+=("$pkg")
     fi
@@ -518,24 +624,17 @@ check_deps_user_mode() {
   fi
 
   if [[ $missing_aur -eq 1 ]]; then
-    if has_aur_helper; then
-      local aur_helper
-      aur_helper="$(get_aur_helper)"
-      yellow "[!] Some AUR dependencies are missing."
-      echo "    Suggested installation command:"
-      echo
-      echo "      ${aur_helper} -S ${suggest_aur[*]}"
-      echo
-    else
-      yellow "[!] Some AUR dependencies are missing (gputest, mbw)."
-      echo "    These require an AUR helper (pamac or yay)."
-      echo "    Install one of them first, then run:"
-      echo
-      echo "      pamac -S ${suggest_aur[*]}"
-      echo "      # or"
-      echo "      yay -S ${suggest_aur[*]}"
+    yellow "[!] Some AUR dependencies are missing."
+    echo "    Suggested installation steps:"
+    echo
+    if ! has_aur_helper; then
+      echo "      1. Install AUR helper:"
+      echo "         pacman -S yay"
       echo
     fi
+    echo "      2. Install AUR packages:"
+    echo "         yay -S ${suggest_aur[*]}"
+    echo
   fi
 
   if [[ $missing_core -eq 0 && $missing_aur -eq 0 ]]; then
@@ -599,30 +698,25 @@ install_deps_root_mode() {
   # Handle AUR packages (install helper if needed, then packages)
   if (( ${#missing_aur[@]} > 0 )); then
     yellow "[*] AUR packages available for installation: ${missing_aur[*]}"
-    echo "    These require an AUR helper (pamac or yay)."
+    echo "    These require an AUR helper (yay)."
     echo
     echo -n "    Install AUR packages? [y/N]: "
     read -r answer
     if [[ "${answer,,}" =~ ^y(es)?$ ]]; then
-      local aur_helper=""
-      
       # Check if AUR helper is already available
       if has_aur_helper; then
-        aur_helper="$(get_aur_helper)"
-        green "    → AUR helper found: ${aur_helper}"
+        green "    → AUR helper (yay) found"
       else
-        # No AUR helper found - install pamac-cli (available via pacman)
-        yellow "    → No AUR helper found. Installing pamac-cli..."
+        # No AUR helper found - install yay (available via pacman)
+        yellow "    → No AUR helper found. Installing yay..."
         echo "    → This will allow installation of AUR packages."
         echo
-        if pacman -S --noconfirm --needed pamac-cli 2>&1 && command -v pamac >/dev/null 2>&1; then
-          aur_helper="pamac"
-          green "    → pamac-cli installed successfully."
+        if pacman -S --noconfirm --needed yay 2>&1 && command -v yay >/dev/null 2>&1; then
+          green "    → yay installed successfully."
         else
-          yellow "    → Warning: Could not install pamac-cli (may not be available on this distro)."
-          echo "    → You may need to install an AUR helper manually:"
-          echo "      sudo pacman -S pamac-cli"
-          echo "      # or install yay from AUR manually"
+          yellow "    → Warning: Could not install yay (may not be available on this distro)."
+          echo "    → You may need to install yay manually:"
+          echo "      pacman -S yay"
           echo "    → Skipping AUR package installation."
           echo
           return 0
@@ -630,32 +724,22 @@ install_deps_root_mode() {
       fi
       
       echo
-      yellow "    Installing AUR packages via ${aur_helper}..."
-      if [[ "$aur_helper" == "pamac" ]]; then
-        # pamac needs --no-confirm for non-interactive mode
-        pamac install --no-confirm "${missing_aur[@]}" 2>&1 || {
-          yellow "    → Warning: AUR installation may have failed or requires manual intervention."
-        }
-      else
-        # yay uses -S --noconfirm
-        yay -S --noconfirm "${missing_aur[@]}" 2>&1 || {
-          yellow "    → Warning: AUR installation may have failed or requires manual intervention."
-        }
-      fi
+      yellow "    Installing AUR packages via yay..."
+      yay -S --noconfirm "${missing_aur[@]}" 2>&1 || {
+        yellow "    → Warning: AUR installation may have failed or requires manual intervention."
+      }
       echo
       green "[✓] AUR dependency installation attempted."
     else
       yellow "    → Skipping AUR package installation."
       echo "    → You can install them manually later:"
       if has_aur_helper; then
-        local aur_helper
-        aur_helper="$(get_aur_helper)"
-        echo "      ${aur_helper} -S ${missing_aur[*]}"
+        echo "      yay -S ${missing_aur[*]}"
       else
-        echo "      # First install an AUR helper:"
-        echo "      sudo pacman -S pamac-cli"
+        echo "      # First install AUR helper:"
+        echo "      pacman -S yay"
         echo "      # Then install AUR packages:"
-        echo "      pamac install ${missing_aur[*]}"
+        echo "      yay -S ${missing_aur[*]}"
       fi
     fi
     echo

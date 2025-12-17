@@ -70,28 +70,48 @@ sanitize_num() {
 # GPU Vendor Detection via lspci
 # ============================================================================
 detect_gpu_vendor() {
+  # First check: if nvidia-smi is available, prefer NVIDIA
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    # Test if nvidia-smi actually works (has a GPU)
+    if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -q .; then
+      echo "nvidia"
+      return
+    fi
+  fi
+  
   if ! command -v lspci >/dev/null 2>&1; then
     echo "unknown"
     return
   fi
   
-  local lspci_line
-  lspci_line="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' | head -n1 || true)"
+  # Get all GPUs and prefer dedicated (NVIDIA/AMD) over integrated (Intel)
+  local all_gpus
+  all_gpus="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
   
-  if [[ -z "$lspci_line" ]]; then
+  if [[ -z "$all_gpus" ]]; then
     echo "unknown"
     return
   fi
   
-  if echo "$lspci_line" | grep -qi 'NVIDIA'; then
+  # Prefer NVIDIA (dedicated) over others
+  if echo "$all_gpus" | grep -qi 'NVIDIA'; then
     echo "nvidia"
-  elif echo "$lspci_line" | grep -qi 'AMD\|ATI'; then
-    echo "amd"
-  elif echo "$lspci_line" | grep -qi 'Intel'; then
-    echo "intel"
-  else
-    echo "unknown"
+    return
   fi
+  
+  # Then prefer AMD (dedicated) over Intel (integrated)
+  if echo "$all_gpus" | grep -qi 'AMD\|ATI'; then
+    echo "amd"
+    return
+  fi
+  
+  # Fallback to Intel (integrated)
+  if echo "$all_gpus" | grep -qi 'Intel'; then
+    echo "intel"
+    return
+  fi
+  
+  echo "unknown"
 }
 
 GPU_VENDOR="$(detect_gpu_vendor)"
@@ -407,12 +427,12 @@ read_nvidia_gpu_sensors() {
       fan="$(echo "$fan" | sed 's/%//' | xargs || echo "")"
     fi
     
-    # Convert empty strings to null
-    [[ -z "$temp" || "$temp" == "" ]] && temp="null"
-    [[ -z "$fan" || "$fan" == "" ]] && fan="null"
-    [[ -z "$power" || "$power" == "" ]] && power="null"
-    [[ -z "$clock_core" || "$clock_core" == "" ]] && clock_core="null"
-    [[ -z "$clock_mem" || "$clock_mem" == "" ]] && clock_mem="null"
+    # Convert [N/A] and empty strings to null
+    [[ -z "$temp" || "$temp" == "" || "$temp" == "[N/A]" ]] && temp="null"
+    [[ -z "$fan" || "$fan" == "" || "$fan" == "[N/A]" ]] && fan="null"
+    [[ -z "$power" || "$power" == "" || "$power" == "[N/A]" ]] && power="null"
+    [[ -z "$clock_core" || "$clock_core" == "" || "$clock_core" == "[N/A]" ]] && clock_core="null"
+    [[ -z "$clock_mem" || "$clock_mem" == "" || "$clock_mem" == "[N/A]" ]] && clock_mem="null"
   fi
   
   echo "$temp|$fan|$power|$clock_core|$clock_mem"

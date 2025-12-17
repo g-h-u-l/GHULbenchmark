@@ -194,7 +194,21 @@ main() {
   if [[ "$gpu_vendor" != "unknown" ]]; then
     if have gputest; then
       green "  Starting GPU stress (moderate, msaa=2, 1280x720)..."
-      gputest /test=fur /width=1280 /height=720 /msaa=2 /gpumon_terminal \
+      # Use prime-run for NVIDIA hybrid graphics or DRI_PRIME=1 for AMD hybrid graphics
+      local gpu_launcher=""
+      if [[ "$gpu_vendor" == "nvidia" ]] && command -v prime-run >/dev/null 2>&1; then
+        gpu_launcher="prime-run "
+      elif [[ "$gpu_vendor" == "amd" ]]; then
+        # Check if AMD hybrid graphics (AMD dedicated + Intel integrated)
+        if command -v lspci >/dev/null 2>&1; then
+          local gpu_list
+          gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
+          if echo "$gpu_list" | grep -qi 'AMD\|ATI' && echo "$gpu_list" | grep -qi 'Intel'; then
+            gpu_launcher="DRI_PRIME=1 "
+          fi
+        fi
+      fi
+      ${gpu_launcher}gputest /test=fur /width=1280 /height=720 /msaa=2 /gpumon_terminal \
         > "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-gpu.log" 2>&1 &
       gpu_pid=$!
       export GPUTEST_PID="$gpu_pid"

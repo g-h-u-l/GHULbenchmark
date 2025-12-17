@@ -157,7 +157,23 @@ main() {
     
     # Use MSAA from environment variable (default to 5 for backward compatibility)
     local msaa="${GHUL_GPU_MSAA:-5}"
-    gputest /test=fur /width="$gpu_width" /height="$gpu_height" /gpumon_terminal /msaa="$msaa" \
+    # Use prime-run for NVIDIA hybrid graphics or DRI_PRIME=1 for AMD hybrid graphics
+    local gpu_launcher=""
+    if [[ "$gpu_vendor" == "nvidia" ]] && command -v prime-run >/dev/null 2>&1; then
+      gpu_launcher="prime-run "
+      yellow "  Using prime-run for NVIDIA GPU"
+    elif [[ "$gpu_vendor" == "amd" ]]; then
+      # Check if AMD hybrid graphics (AMD dedicated + Intel integrated)
+      if command -v lspci >/dev/null 2>&1; then
+        local gpu_list
+        gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
+        if echo "$gpu_list" | grep -qi 'AMD\|ATI' && echo "$gpu_list" | grep -qi 'Intel'; then
+          gpu_launcher="DRI_PRIME=1 "
+          yellow "  Using DRI_PRIME=1 for AMD GPU"
+        fi
+      fi
+    fi
+    ${gpu_launcher}gputest /test=fur /width="$gpu_width" /height="$gpu_height" /gpumon_terminal /msaa="$msaa" \
       > "${LOGDIR}/$(get_timestamp)-${HOST}-gpu-stress.log" 2>&1 &
     stress_pid=$!
     export STRESS_PID="$stress_pid"

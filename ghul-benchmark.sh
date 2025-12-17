@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.4.3"
+GHUL_VERSION="0.4.4"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -571,16 +571,31 @@ cpu_model="${cpu_model:-unknown}"
 cpu_socket="unknown"
 if have dmidecode; then
   # Try to get socket designation from dmidecode -t processor
-  # This requires root, but we try anyway (may fail gracefully)
-  cpu_socket="$(sudo dmidecode -t processor 2>/dev/null | awk -F: '
+  # First try without sudo (works if user has permissions or dmidecode has capabilities)
+  cpu_socket="$(dmidecode -t processor 2>/dev/null | awk -F: '
     /Socket Designation/ {
       gsub(/^[ \t]+|[ \t]+$/, "", $2);
       print $2;
       exit
     }' || echo "unknown")"
+  
+  # If that failed, try with sudo (but only if sudo is available and doesn't require password)
+  # Use timeout to prevent hanging on password prompt
+  if [[ -z "$cpu_socket" || "$cpu_socket" == "unknown" ]]; then
+    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      # sudo works without password, safe to use
+      cpu_socket="$(sudo dmidecode -t processor 2>/dev/null | awk -F: '
+        /Socket Designation/ {
+          gsub(/^[ \t]+|[ \t]+$/, "", $2);
+          print $2;
+          exit
+        }' || echo "unknown")"
+    fi
+  fi
+  
   # Fallback: try Upgrade field if Socket Designation is empty
   if [[ -z "$cpu_socket" || "$cpu_socket" == "unknown" ]]; then
-    cpu_socket="$(sudo dmidecode -t processor 2>/dev/null | awk -F: '
+    cpu_socket="$(dmidecode -t processor 2>/dev/null | awk -F: '
       /Upgrade/ {
         gsub(/^[ \t]+|[ \t]+$/, "", $2);
         # Remove "Socket " prefix if present
@@ -588,6 +603,20 @@ if have dmidecode; then
         print $2;
         exit
       }' || echo "unknown")"
+    
+    # Try with sudo if still unknown and sudo works without password
+    if [[ -z "$cpu_socket" || "$cpu_socket" == "unknown" ]]; then
+      if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        cpu_socket="$(sudo dmidecode -t processor 2>/dev/null | awk -F: '
+          /Upgrade/ {
+            gsub(/^[ \t]+|[ \t]+$/, "", $2);
+            # Remove "Socket " prefix if present
+            sub(/^Socket[ \t]+/, "", $2);
+            print $2;
+            exit
+          }' || echo "unknown")"
+      fi
+    fi
   fi
 fi
 # Final fallback: read from .ghul_host_id.json (set by firstrun.sh with root)
@@ -1298,13 +1327,43 @@ echo "-- GPU tests..."
 echo "   glmark2"
 GPU_JSON='{}'
 
+# Helper function: get GPU launcher command (prime-run for NVIDIA, DRI_PRIME=1 for AMD hybrid graphics)
+get_gpu_launcher() {
+  if [[ "$gpu_vendor" == "nvidia" ]] && command -v prime-run >/dev/null 2>&1; then
+    echo "prime-run "
+  elif [[ "$gpu_vendor" == "amd" ]]; then
+    # Check if AMD hybrid graphics (AMD dedicated + Intel integrated)
+    # This is detected by checking if we have both AMD and Intel GPUs
+    if command -v lspci >/dev/null 2>&1; then
+      local gpu_list
+      gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
+      if echo "$gpu_list" | grep -qi 'AMD\|ATI' && echo "$gpu_list" | grep -qi 'Intel'; then
+        # AMD hybrid detected - use DRI_PRIME=1
+        echo "DRI_PRIME=1 "
+      fi
+    fi
+  fi
+  # Return empty string if no launcher needed
+  echo ""
+}
+
+GPU_LAUNCHER="$(get_gpu_launcher)"
+if [[ -n "$GPU_LAUNCHER" ]]; then
+  if [[ "$GPU_LAUNCHER" == "prime-run " ]]; then
+    echo "   [Using prime-run for NVIDIA GPU]"
+  elif [[ "$GPU_LAUNCHER" == "DRI_PRIME=1 " ]]; then
+    echo "   [Using DRI_PRIME=1 for AMD GPU]"
+  fi
+fi
+
 # glmark2
 if have glmark2; then
   gl_log="${LOGDIR}/glmark2_${TS}.log"
 
   # Run glmark2 in fullscreen at 1920x1080, neutral locale for parsing
+  # Use prime-run if NVIDIA GPU detected and prime-run is available
   env LANG=C LC_ALL=C \
-    glmark2 --fullscreen --size 1920x1080 >"$gl_log" 2>&1
+    ${GPU_LAUNCHER}glmark2 --fullscreen --size 1920x1080 >"$gl_log" 2>&1
 
   # Parse the final glmark2 Score line
   score="$(awk -F: '/glmark2 Score/ { gsub(/[[:space:]]+/,"",$2); print $2 }' "$gl_log" | tail -1)"
@@ -1348,18 +1407,18 @@ if have vkmark; then
 
   if command -v gamescope >/dev/null 2>&1; then
     {
-      setsid bash -c '
+      setsid bash -c "
         env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 \
-          gamescope -f -w 1920 -h 1080 -- \
-          vkmark --winsys=xcb > "'"$tmp_log"'" 2>&1
-      '
+          ${GPU_LAUNCHER}gamescope -f -w 1920 -h 1080 -- \
+          vkmark --winsys=xcb > \"$tmp_log\" 2>&1
+      "
     } >/dev/null 2>&1 || true
   else
     {
-      setsid bash -c '
+      setsid bash -c "
         env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 \
-          vkmark --winsys=xcb > "'"$tmp_log"'" 2>&1
-      '
+          ${GPU_LAUNCHER}vkmark --winsys=xcb > \"$tmp_log\" 2>&1
+      "
     } >/dev/null 2>&1 || true
   fi
 
@@ -1419,8 +1478,9 @@ if have gputest; then
 
   # Run GpuTest with forced score output on stdout
   # /print_score ensures a machine-readable summary
+  # Use prime-run if NVIDIA GPU detected and prime-run is available
   set +e
-  gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /benchmark /print_score \
+  ${GPU_LAUNCHER}gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /benchmark /print_score \
       >"$gputest_log" 2>&1
   exitcode=$?
   set -e
