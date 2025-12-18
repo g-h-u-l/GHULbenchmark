@@ -193,9 +193,21 @@ main() {
   # Start GPU stress (moderate, msaa=2)
   if [[ "$gpu_vendor" != "unknown" ]]; then
     if have gputest; then
-      green "  Starting GPU stress (moderate, msaa=2, 1280x720)..."
+      # Determine GPU resolution for cooler test (lower than GPU-only test)
+      local cooler_gpu_width=1920
+      local cooler_gpu_height=1080
+      if [[ -n "${GHUL_COOLER_GPU_RESOLUTION:-}" ]]; then
+        # Parse resolution from format "1920x1080" or "1280x720"
+        if [[ "$GHUL_COOLER_GPU_RESOLUTION" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+          cooler_gpu_width="${BASH_REMATCH[1]}"
+          cooler_gpu_height="${BASH_REMATCH[2]}"
+        fi
+      fi
+      
+      green "  Starting GPU stress (moderate, ${cooler_gpu_width}x${cooler_gpu_height}, MSAA=0)..."
       # Use prime-run for NVIDIA hybrid graphics or DRI_PRIME=1 for AMD hybrid graphics
       local gpu_launcher=""
+      local gpu_env=""
       if [[ "$gpu_vendor" == "nvidia" ]] && command -v prime-run >/dev/null 2>&1; then
         gpu_launcher="prime-run "
       elif [[ "$gpu_vendor" == "amd" ]]; then
@@ -204,15 +216,51 @@ main() {
           local gpu_list
           gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
           if echo "$gpu_list" | grep -qi 'AMD\|ATI' && echo "$gpu_list" | grep -qi 'Intel'; then
-            gpu_launcher="DRI_PRIME=1 "
+            gpu_env="DRI_PRIME=1"
           fi
         fi
       fi
-      ${gpu_launcher}gputest /test=fur /width=1280 /height=720 /msaa=2 /gpumon_terminal \
-        > "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-gpu.log" 2>&1 &
-      gpu_pid=$!
-      export GPUTEST_PID="$gpu_pid"
-      green "    GPU stress started (PID: $gpu_pid)"
+      # Use env to set DRI_PRIME if needed, or just use gpu_launcher for prime-run
+      # Start in a new process group (setsid) so we can kill the entire group later
+      if [[ -n "$gpu_env" ]]; then
+        setsid env "$gpu_env" gputest /test=fur /width="$cooler_gpu_width" /height="$cooler_gpu_height" /msaa=0 /gpumon_terminal \
+          > "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-gpu.log" 2>&1 &
+      else
+        setsid ${gpu_launcher}gputest /test=fur /width="$cooler_gpu_width" /height="$cooler_gpu_height" /msaa=0 /gpumon_terminal \
+          > "${LOGDIR}/$(get_timestamp)-${HOST}-cooler-gpu.log" 2>&1 &
+      fi
+      local setsid_pid=$!
+      
+      # Wait for gputest to actually start (setsid returns immediately)
+      sleep 2
+      
+      # Find the actual gputest process (setsid/prime-run are just wrappers)
+      local gputest_pid
+      # Method 1: Find by name pattern (most reliable)
+      gputest_pid="$(pgrep -f "gputest.*fur" 2>/dev/null | head -1 || true)"
+      # Method 2: Find any gputest process
+      if [[ -z "$gputest_pid" ]]; then
+        gputest_pid="$(pgrep -f "gputest" 2>/dev/null | head -1 || true)"
+      fi
+      # Method 3: Find in process tree
+      if [[ -z "$gputest_pid" ]]; then
+        gputest_pid="$(ps aux 2>/dev/null | grep -E "[g]putest.*fur" | awk '{print $2}' | head -1 || true)"
+      fi
+      
+      # Use the actual gputest PID for monitoring, but keep setsid_pid for killing the process group
+      if [[ -n "$gputest_pid" ]]; then
+        gpu_pid="$gputest_pid"
+        export GPUTEST_PID="$gputest_pid"
+        export SETSID_PID="$setsid_pid"  # Keep for process group killing
+        green "    GPU stress started (gputest PID: $gputest_pid, setsid PGID: $setsid_pid)"
+      else
+        # Fallback: use setsid PID (not ideal, but better than nothing)
+        gpu_pid="$setsid_pid"
+        export GPUTEST_PID="$setsid_pid"
+        export SETSID_PID="$setsid_pid"
+        yellow "    Warning: Could not find gputest PID, using setsid PID: $setsid_pid"
+        green "    GPU stress started (PID: $setsid_pid)"
+      fi
     elif have stress-ng && stress-ng --help 2>&1 | grep -q "gpu"; then
       green "  Starting GPU stress (stress-ng)..."
       stress-ng \
@@ -260,24 +308,48 @@ main() {
   
   # Wait for duration or until process dies
   while [[ $(date +%s) -lt $end_time ]]; do
-    # Check if any critical process died
-    if [[ -n "$cpu_pid" ]] && ! kill -0 "$cpu_pid" 2>/dev/null; then
-      yellow "  CPU stress process ended early"
+    # Check if safety stop was triggered
+    if [[ -f "${LOGDIR}/.cooler_safety_status_${HELLFIRE_TEST_NAME}" ]]; then
+      # Safety stop triggered - break immediately
       cooler_failed=1
-      cooler_status_reason="CPU stress terminated early (before ${DURATION}s)"
       break
+    fi
+    
+    # Check if any critical process died (but only if it's truly early, not at timeout)
+    elapsed=$(( $(date +%s) - start_time ))
+    time_remaining=$((DURATION - elapsed))
+    
+    # Only mark as "early" if process died with more than 5 seconds remaining
+    # stress-ng with --timeout will end exactly at the timeout, so we allow ±2 seconds
+    if [[ -n "$cpu_pid" ]] && ! kill -0 "$cpu_pid" 2>/dev/null; then
+      if [[ $elapsed -lt $((DURATION - 5)) ]]; then
+        yellow "  CPU stress process ended early (${elapsed}s / ${DURATION}s)"
+        cooler_failed=1
+        cooler_status_reason="CPU stress terminated early at ${elapsed}s (before ${DURATION}s)"
+        break
+      fi
+      # Process ended near timeout - this is normal for stress-ng with --timeout
+      # Don't mark as failed, just continue
     fi
     if [[ -n "$ram_pid" ]] && ! kill -0 "$ram_pid" 2>/dev/null; then
-      yellow "  RAM stress process ended early"
-      cooler_failed=1
-      cooler_status_reason="RAM stress terminated early (before ${DURATION}s)"
-      break
+      if [[ $elapsed -lt $((DURATION - 5)) ]]; then
+        yellow "  RAM stress process ended early (${elapsed}s / ${DURATION}s)"
+        cooler_failed=1
+        cooler_status_reason="RAM stress terminated early at ${elapsed}s (before ${DURATION}s)"
+        break
+      fi
+      # Process ended near timeout - this is normal for stress-ng with --timeout
+      # Don't mark as failed, just continue
     fi
     if [[ -n "$gpu_pid" ]] && ! kill -0 "$gpu_pid" 2>/dev/null; then
-      yellow "  GPU stress process ended early"
-      cooler_failed=1
-      cooler_status_reason="GPU stress (FurMark) terminated early (before ${DURATION}s). Likely window closed or crash; GPU load not sustained."
-      break
+      if [[ $elapsed -lt $((DURATION - 5)) ]]; then
+        yellow "  GPU stress process ended early (${elapsed}s / ${DURATION}s)"
+        cooler_failed=1
+        cooler_status_reason="GPU stress (FurMark) terminated early at ${elapsed}s (before ${DURATION}s). Likely window closed or crash; GPU load not sustained."
+        break
+      fi
+      # Process ended near timeout - this is normal
+      # Don't mark as failed, just continue
     fi
     sleep 1
   done
@@ -296,23 +368,99 @@ main() {
   fi
   
   # Kill GPU (gputest needs aggressive kill)
+  # Use GPUTEST_PID if available (actual gputest process), otherwise use gpu_pid (prime-run wrapper)
+  local kill_pid="${GPUTEST_PID:-$gpu_pid}"
+  
   if [[ -n "$gpu_pid" ]]; then
-    kill "$gpu_pid" 2>/dev/null || true
-    sleep 1
-    if kill -0 "$gpu_pid" 2>/dev/null; then
-      kill -TERM "$gpu_pid" 2>/dev/null || true
-      sleep 1
+    # Kill the actual gputest process first
+    if [[ -n "${GPUTEST_PID:-}" ]] && [[ "$GPUTEST_PID" != "$gpu_pid" ]]; then
+      kill "$GPUTEST_PID" 2>/dev/null || true
+      sleep 0.5
+      if kill -0 "$GPUTEST_PID" 2>/dev/null; then
+        kill -TERM "$GPUTEST_PID" 2>/dev/null || true
+        sleep 0.5
+      fi
+      if kill -0 "$GPUTEST_PID" 2>/dev/null; then
+        kill -9 "$GPUTEST_PID" 2>/dev/null || true
+      fi
+      pkill -P "$GPUTEST_PID" 2>/dev/null || true
+      pkill -9 -P "$GPUTEST_PID" 2>/dev/null || true
+      wait "$GPUTEST_PID" 2>/dev/null || true
     fi
-    if kill -0 "$gpu_pid" 2>/dev/null; then
-      kill -9 "$gpu_pid" 2>/dev/null || true
+    
+    # Kill entire process group (important for prime-run wrapper)
+    # Use SETSID_PID if available (the process group leader)
+    local pgid_to_kill="${SETSID_PID:-$gpu_pid}"
+    if [[ -n "$pgid_to_kill" ]]; then
+      # Kill the entire process group (setsid makes PID = PGID)
+      kill -TERM -"$pgid_to_kill" 2>/dev/null || true
+      sleep 0.5
+      kill -9 -"$pgid_to_kill" 2>/dev/null || true
+      # Also try to get PGID from process (fallback)
+      local pgid
+      pgid="$(ps -o pgid= -p "$pgid_to_kill" 2>/dev/null | tr -d ' ' || true)"
+      if [[ -n "$pgid" ]] && [[ "$pgid" != "$pgid_to_kill" ]]; then
+        kill -TERM -"$pgid" 2>/dev/null || true
+        sleep 0.5
+        kill -9 -"$pgid" 2>/dev/null || true
+      fi
     fi
-    pkill -P "$gpu_pid" 2>/dev/null || true
-    pkill -9 -P "$gpu_pid" 2>/dev/null || true
-    pkill -f "gputest.*fur" 2>/dev/null || true
+      
+      # Also kill prime-run wrapper directly
+      if kill -0 "$gpu_pid" 2>/dev/null; then
+        kill "$gpu_pid" 2>/dev/null || true
+        sleep 0.5
+        if kill -0 "$gpu_pid" 2>/dev/null; then
+          kill -TERM "$gpu_pid" 2>/dev/null || true
+          sleep 0.5
+        fi
+        if kill -0 "$gpu_pid" 2>/dev/null; then
+          kill -9 "$gpu_pid" 2>/dev/null || true
+        fi
+        pkill -P "$gpu_pid" 2>/dev/null || true
+        pkill -9 -P "$gpu_pid" 2>/dev/null || true
+        wait "$gpu_pid" 2>/dev/null || true
+      fi
+    fi
+    
+    # Final fallback: kill by name (catches any remaining gputest processes)
+    pkill -f "gputest" 2>/dev/null || true
     sleep 0.5
-    pkill -9 -f "gputest.*fur" 2>/dev/null || true
-    wait "$gpu_pid" 2>/dev/null || true
-  fi
+    pkill -9 -f "gputest" 2>/dev/null || true
+    # Also kill prime-run if still running
+    pkill -f "prime-run.*gputest" 2>/dev/null || true
+    sleep 0.5
+    pkill -9 -f "prime-run.*gputest" 2>/dev/null || true
+    
+    # Final fallback: Try to close X11 window if process is dead but window still open
+    # Wait a moment to see if window closes on its own
+    sleep 1
+    # Check if any gputest processes are still running
+    if ! pgrep -f "gputest" >/dev/null 2>&1; then
+      # Process is dead, but window might still be open
+      # Try to find and close FurMark window
+      if command -v xdotool >/dev/null 2>&1; then
+        xdotool search --name "FurMark" windowclose 2>/dev/null || true
+        xdotool search --name "GpuTest" windowclose 2>/dev/null || true
+      elif command -v wmctrl >/dev/null 2>&1; then
+        wmctrl -c "FurMark" 2>/dev/null || true
+        wmctrl -c "GpuTest" 2>/dev/null || true
+      elif command -v xwininfo >/dev/null 2>&1; then
+        # Try to find window by name and close it via xkill
+        local win_id
+        win_id="$(xwininfo -root -tree 2>/dev/null | grep -i "furmark\|gputest" | head -1 | awk '{print $1}' || true)"
+        if [[ -n "$win_id" ]] && [[ "$win_id" =~ ^0x[0-9a-f]+$ ]]; then
+          # Send close window message via xdotool or xkill
+          xkill -id "$win_id" 2>/dev/null || true
+        fi
+      fi
+      
+      # If we still can't close it, warn user
+      if pgrep -f "gputest" >/dev/null 2>&1 || (command -v xwininfo >/dev/null 2>&1 && xwininfo -root -tree 2>/dev/null | grep -qi "furmark\|gputest"); then
+        yellow "  ⚠️  Warning: gputest process terminated, but FurMark window may still be visible."
+        yellow "  Please close the window manually if it remains open."
+      fi
+    fi
   
   # Kill disk stress
   if [[ -n "$disk_pid" ]]; then
@@ -320,8 +468,9 @@ main() {
     wait "$disk_pid" 2>/dev/null || true
   fi
   
-  # If GPU died early and no safety stop was triggered, mark as failed
-  if [[ $cooler_failed -eq 1 ]] && [[ -n "$gpu_pid" ]] && ! kill -0 "$gpu_pid" 2>/dev/null; then
+  # If a process died early and no safety stop was triggered, mark as failed
+  # But only if it was truly early (not near timeout)
+  if [[ $cooler_failed -eq 1 ]] && [[ -n "$cooler_status_reason" ]]; then
     export HELLFIRE_COOLER_SAFETY_FAILED=1
     export HELLFIRE_COOLER_SAFETY_REASON="${cooler_status_reason}"
     red "  🚨 EARLY TERMINATION: ${cooler_status_reason}"

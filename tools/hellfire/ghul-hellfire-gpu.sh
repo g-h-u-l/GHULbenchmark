@@ -34,13 +34,13 @@ show_help() {
   echo "  $0 60               # Run for 60 seconds (1 minute)"
   echo
   echo "Description:"
-  echo "  Extreme GPU stress test using FurMark with MSAA=5 (brute force mode)."
+  echo "  Extreme GPU stress test using FurMark with high resolution (thermal load focus)."
   echo "  Monitors GPU edge, hotspot, and VRAM temperatures. Triggers safety stops"
   echo "  if critical thresholds are exceeded (VRAM > 90°C, Hotspot > 100°C)."
   echo
   echo "WARNING:"
   echo "  This is NOT a benchmark. This is hardware torture."
-  echo "  Uses /msaa=5 and unlimited FPS - this is brute force!"
+  echo "  Uses high resolution (2K/4K) and unlimited FPS - this is brute force!"
   echo "  Your GPU will reach maximum temperatures. Ensure adequate cooling!"
   exit 0
 }
@@ -67,7 +67,7 @@ fi
 main() {
   print_hellfire_warning
   
-  yellow "This is no benchmark, we use /msaa=5 extra flag and the FPS will be unlimited."
+  yellow "This is no benchmark, we use high resolution and unlimited FPS."
   yellow "This is brute force! Are you sure you want to burn your GPU, really?"
   echo
   
@@ -155,10 +155,11 @@ main() {
       fi
     fi
     
-    # Use MSAA from environment variable (default to 5 for backward compatibility)
-    local msaa="${GHUL_GPU_MSAA:-5}"
+    # Use MSAA from environment variable (default to 0 - focus on thermal load, not driver stress)
+    local msaa="${GHUL_GPU_MSAA:-0}"
     # Use prime-run for NVIDIA hybrid graphics or DRI_PRIME=1 for AMD hybrid graphics
     local gpu_launcher=""
+    local gpu_env=""
     if [[ "$gpu_vendor" == "nvidia" ]] && command -v prime-run >/dev/null 2>&1; then
       gpu_launcher="prime-run "
       yellow "  Using prime-run for NVIDIA GPU"
@@ -168,17 +169,54 @@ main() {
         local gpu_list
         gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
         if echo "$gpu_list" | grep -qi 'AMD\|ATI' && echo "$gpu_list" | grep -qi 'Intel'; then
-          gpu_launcher="DRI_PRIME=1 "
+          gpu_env="DRI_PRIME=1"
           yellow "  Using DRI_PRIME=1 for AMD GPU"
         fi
       fi
     fi
-    ${gpu_launcher}gputest /test=fur /width="$gpu_width" /height="$gpu_height" /gpumon_terminal /msaa="$msaa" \
-      > "${LOGDIR}/$(get_timestamp)-${HOST}-gpu-stress.log" 2>&1 &
-    stress_pid=$!
-    export STRESS_PID="$stress_pid"
-    export GPUTEST_PID="$stress_pid"
-    green "  GpuTest FurMark started (PID: $stress_pid)"
+    # Use env to set DRI_PRIME if needed, or just use gpu_launcher for prime-run
+    # Start in a new process group (setsid) so we can kill the entire group later
+    if [[ -n "$gpu_env" ]]; then
+      setsid env "$gpu_env" gputest /test=fur /width="$gpu_width" /height="$gpu_height" /gpumon_terminal /msaa="$msaa" \
+        > "${LOGDIR}/$(get_timestamp)-${HOST}-gpu-stress.log" 2>&1 &
+    else
+      setsid ${gpu_launcher}gputest /test=fur /width="$gpu_width" /height="$gpu_height" /gpumon_terminal /msaa="$msaa" \
+        > "${LOGDIR}/$(get_timestamp)-${HOST}-gpu-stress.log" 2>&1 &
+    fi
+    local setsid_pid=$!
+    
+    # Wait for gputest to actually start (setsid returns immediately)
+    sleep 2
+    
+    # Find the actual gputest process (setsid/prime-run are just wrappers)
+    local gputest_pid
+    # Method 1: Find by name pattern (most reliable)
+    gputest_pid="$(pgrep -f "gputest.*fur" 2>/dev/null | head -1 || true)"
+    # Method 2: Find any gputest process
+    if [[ -z "$gputest_pid" ]]; then
+      gputest_pid="$(pgrep -f "gputest" 2>/dev/null | head -1 || true)"
+    fi
+    # Method 3: Find in process tree
+    if [[ -z "$gputest_pid" ]]; then
+      gputest_pid="$(ps aux 2>/dev/null | grep -E "[g]putest.*fur" | awk '{print $2}' | head -1 || true)"
+    fi
+    
+    # Use the actual gputest PID for monitoring, but keep setsid_pid for killing the process group
+    if [[ -n "$gputest_pid" ]]; then
+      stress_pid="$gputest_pid"
+      export STRESS_PID="$gputest_pid"
+      export GPUTEST_PID="$gputest_pid"
+      export SETSID_PID="$setsid_pid"  # Keep for process group killing
+      green "  GpuTest FurMark started (gputest PID: $gputest_pid, setsid PGID: $setsid_pid)"
+    else
+      # Fallback: use setsid PID (not ideal, but better than nothing)
+      stress_pid="$setsid_pid"
+      export STRESS_PID="$setsid_pid"
+      export GPUTEST_PID="$setsid_pid"
+      export SETSID_PID="$setsid_pid"
+      yellow "  Warning: Could not find gputest PID, using setsid PID: $setsid_pid"
+      green "  GpuTest FurMark started (PID: $setsid_pid)"
+    fi
     green "  Test will run for ${DURATION} seconds, then be terminated"
   else
     red "  Error: No GPU stress test tool found!"
@@ -231,35 +269,108 @@ main() {
     fi
     
     # Kill the process if it's still running (more aggressively)
-    if kill -0 "$stress_pid" 2>/dev/null; then
+    # Use GPUTEST_PID if available (actual gputest process), otherwise use stress_pid (prime-run wrapper)
+    local kill_pid="${GPUTEST_PID:-$stress_pid}"
+    
+    if kill -0 "$kill_pid" 2>/dev/null || kill -0 "$stress_pid" 2>/dev/null; then
       green "  Test duration reached (${DURATION}s), terminating gputest..."
-      # First try graceful termination
-      kill "$stress_pid" 2>/dev/null || true
-      sleep 1
       
-      # If still running, try SIGTERM
-      if kill -0 "$stress_pid" 2>/dev/null; then
-        kill -TERM "$stress_pid" 2>/dev/null || true
-        sleep 1
+      # Kill the actual gputest process first
+      if [[ -n "${GPUTEST_PID:-}" ]] && [[ "$GPUTEST_PID" != "$stress_pid" ]]; then
+        kill "$GPUTEST_PID" 2>/dev/null || true
+        sleep 0.5
+        if kill -0 "$GPUTEST_PID" 2>/dev/null; then
+          kill -TERM "$GPUTEST_PID" 2>/dev/null || true
+          sleep 0.5
+        fi
+        if kill -0 "$GPUTEST_PID" 2>/dev/null; then
+          kill -9 "$GPUTEST_PID" 2>/dev/null || true
+        fi
       fi
       
-      # If still running, force kill with SIGKILL
+      # Kill prime-run wrapper if it's still running
       if kill -0 "$stress_pid" 2>/dev/null; then
-        yellow "  Force killing gputest process..."
-        kill -9 "$stress_pid" 2>/dev/null || true
+        kill "$stress_pid" 2>/dev/null || true
+        sleep 0.5
+        if kill -0 "$stress_pid" 2>/dev/null; then
+          kill -TERM "$stress_pid" 2>/dev/null || true
+          sleep 0.5
+        fi
+        if kill -0 "$stress_pid" 2>/dev/null; then
+          kill -9 "$stress_pid" 2>/dev/null || true
+        fi
+      fi
+      
+      # Kill entire process group (important for prime-run wrapper)
+      # Use SETSID_PID if available (the process group leader)
+      local pgid_to_kill="${SETSID_PID:-$stress_pid}"
+      if [[ -n "$pgid_to_kill" ]]; then
+        # Kill the entire process group (setsid makes PID = PGID)
+        kill -TERM -"$pgid_to_kill" 2>/dev/null || true
+        sleep 0.5
+        kill -9 -"$pgid_to_kill" 2>/dev/null || true
+        # Also try to get PGID from process (fallback)
+        local pgid
+        pgid="$(ps -o pgid= -p "$pgid_to_kill" 2>/dev/null | tr -d ' ' || true)"
+        if [[ -n "$pgid" ]] && [[ "$pgid" != "$pgid_to_kill" ]]; then
+          kill -TERM -"$pgid" 2>/dev/null || true
+          sleep 0.5
+          kill -9 -"$pgid" 2>/dev/null || true
+        fi
       fi
       
       # Also kill any child processes (gputest might spawn children)
+      if [[ -n "${GPUTEST_PID:-}" ]]; then
+        pkill -P "$GPUTEST_PID" 2>/dev/null || true
+        pkill -9 -P "$GPUTEST_PID" 2>/dev/null || true
+      fi
       pkill -P "$stress_pid" 2>/dev/null || true
       pkill -9 -P "$stress_pid" 2>/dev/null || true
       
-      # Wait for process to die
+      # Wait for processes to die
       wait "$stress_pid" 2>/dev/null || true
+      if [[ -n "${GPUTEST_PID:-}" ]] && [[ "$GPUTEST_PID" != "$stress_pid" ]]; then
+        wait "$GPUTEST_PID" 2>/dev/null || true
+      fi
       
-      # Final check: kill by name if still running
-      pkill -f "gputest.*fur" 2>/dev/null || true
+      # Final check: kill by name if still running (fallback - most aggressive)
+      pkill -f "gputest" 2>/dev/null || true
       sleep 0.5
-      pkill -9 -f "gputest.*fur" 2>/dev/null || true
+      pkill -9 -f "gputest" 2>/dev/null || true
+      # Also kill prime-run if still running
+      pkill -f "prime-run.*gputest" 2>/dev/null || true
+      sleep 0.5
+      pkill -9 -f "prime-run.*gputest" 2>/dev/null || true
+      
+      # Final fallback: Try to close X11 window if process is dead but window still open
+      # Wait a moment to see if window closes on its own
+      sleep 1
+      # Check if any gputest processes are still running
+      if ! pgrep -f "gputest" >/dev/null 2>&1; then
+        # Process is dead, but window might still be open
+        # Try to find and close FurMark window
+        if command -v xdotool >/dev/null 2>&1; then
+          xdotool search --name "FurMark" windowclose 2>/dev/null || true
+          xdotool search --name "GpuTest" windowclose 2>/dev/null || true
+        elif command -v wmctrl >/dev/null 2>&1; then
+          wmctrl -c "FurMark" 2>/dev/null || true
+          wmctrl -c "GpuTest" 2>/dev/null || true
+        elif command -v xwininfo >/dev/null 2>&1; then
+          # Try to find window by name and close it via xkill
+          local win_id
+          win_id="$(xwininfo -root -tree 2>/dev/null | grep -i "furmark\|gputest" | head -1 | awk '{print $1}' || true)"
+          if [[ -n "$win_id" ]] && [[ "$win_id" =~ ^0x[0-9a-f]+$ ]]; then
+            # Send close window message via xdotool or xkill
+            xkill -id "$win_id" 2>/dev/null || true
+          fi
+        fi
+        
+        # If we still can't close it, warn user
+        if pgrep -f "gputest" >/dev/null 2>&1 || (command -v xwininfo >/dev/null 2>&1 && xwininfo -root -tree 2>/dev/null | grep -qi "furmark\|gputest"); then
+          yellow "  ⚠️  Warning: gputest process terminated, but FurMark window may still be visible."
+          yellow "  Please close the window manually if it remains open."
+        fi
+      fi
     fi
   else
     # stress-ng will complete on its own

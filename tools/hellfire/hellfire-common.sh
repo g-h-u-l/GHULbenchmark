@@ -304,24 +304,48 @@ monitor_cpu_temp() {
 # ============================================================================
 
 detect_gpu_vendor() {
-  local lspci_line
-  lspci_line="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' | head -n1 || true)"
+  # First check: if nvidia-smi is available, prefer NVIDIA
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    # Test if nvidia-smi actually works (has a GPU)
+    if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -q .; then
+      echo "nvidia"
+      return
+    fi
+  fi
   
-  if [[ -z "$lspci_line" ]]; then
+  if ! command -v lspci >/dev/null 2>&1; then
     echo "unknown"
     return
   fi
   
-  # Check NVIDIA first (to avoid matching "ati" in "Corporation")
-  if echo "$lspci_line" | grep -qiE "nvidia|geforce"; then
-    echo "nvidia"
-  elif echo "$lspci_line" | grep -qiE "amd|ati|radeon"; then
-    echo "amd"
-  elif echo "$lspci_line" | grep -qi "intel"; then
-    echo "intel"
-  else
+  # Get all GPUs and prefer dedicated (NVIDIA/AMD) over integrated (Intel)
+  local all_gpus
+  all_gpus="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
+  
+  if [[ -z "$all_gpus" ]]; then
     echo "unknown"
+    return
   fi
+  
+  # Prefer NVIDIA (dedicated) over others
+  if echo "$all_gpus" | grep -qi 'NVIDIA'; then
+    echo "nvidia"
+    return
+  fi
+  
+  # Then prefer AMD (dedicated) over Intel (integrated)
+  if echo "$all_gpus" | grep -qiE '\bAMD\b|\bATI\b|\bRadeon\b'; then
+    echo "amd"
+    return
+  fi
+  
+  # Fallback to Intel (integrated)
+  if echo "$all_gpus" | grep -qi 'Intel'; then
+    echo "intel"
+    return
+  fi
+  
+  echo "unknown"
 }
 
 read_amd_gpu_sensors() {

@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.4.4"
+GHUL_VERSION="0.4.5"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -1637,25 +1637,29 @@ if [[ "${GHUL_HELLFIRE:-0}" -eq 1 ]]; then
   
   HELLFIRE_DIR="${BASE}/tools/hellfire"
   
-  # Determine durations based on --insane or --wimp flag
+  # Determine durations and resolutions based on --insane or --wimp flag
   if [[ "${GHUL_WIMP:-0}" -eq 1 ]]; then
     CPU_DURATION=60
     RAM_DURATION=60
     GPU_DURATION=60
     COOLER_DURATION=60
-    GPU_RESOLUTION="1920x1080"
-    GPU_MSAA=2
-    echo "[GHUL] 🐣 WIMP MODE: Reduced settings (60s per test, GPU MSAA=2)"
+    GPU_RESOLUTION="1920x1080"  # Full HD
+    COOLER_GPU_RESOLUTION="1280x720"  # HD Ready
+    GPU_MSAA=0  # No MSAA - focus on thermal load, not driver stress
+    echo "[GHUL] 🐣 WIMP MODE: Reduced settings (60s per test)"
+    echo "[GHUL]    GPU: ${GPU_RESOLUTION}, Cooler: ${COOLER_GPU_RESOLUTION}, MSAA=0"
     echo ""
   elif [[ "${GHUL_INSANE:-0}" -eq 1 ]]; then
     CPU_DURATION=600
     RAM_DURATION=600
     GPU_DURATION=600
     COOLER_DURATION=300
-    GPU_RESOLUTION="3840x2160"  # 4K
-    GPU_MSAA=5
+    GPU_RESOLUTION="3840x2160"  # 4K UHD
+    COOLER_GPU_RESOLUTION="2560x1440"  # 2K
+    GPU_MSAA=0  # No MSAA - focus on thermal load, not driver stress
     echo "[GHUL] ⚠️  INSANE MODE: Maximum settings enabled!"
     echo "[GHUL]    CPU: ${CPU_DURATION}s, RAM: ${RAM_DURATION}s, GPU: ${GPU_DURATION}s @ ${GPU_RESOLUTION}"
+    echo "[GHUL]    Cooler: ${COOLER_DURATION}s @ ${COOLER_GPU_RESOLUTION}"
     echo "[GHUL]    Only for systems with extreme cooling (LN2, etc.)!"
     echo ""
   else
@@ -1663,15 +1667,17 @@ if [[ "${GHUL_HELLFIRE:-0}" -eq 1 ]]; then
     RAM_DURATION=300
     GPU_DURATION=180
     COOLER_DURATION=180
-    GPU_RESOLUTION="1920x1080"
-    GPU_MSAA=5
+    GPU_RESOLUTION="2560x1440"  # 2K
+    COOLER_GPU_RESOLUTION="1920x1080"  # Full HD
+    GPU_MSAA=0  # No MSAA - focus on thermal load, not driver stress
   fi
   
   # Export flags for Hellfire scripts
   export GHUL_INSANE_MODE="${GHUL_INSANE:-0}"
   export GHUL_WIMP_MODE="${GHUL_WIMP:-0}"
   export GHUL_GPU_RESOLUTION="$GPU_RESOLUTION"
-  export GHUL_GPU_MSAA="${GPU_MSAA:-5}"
+  export GHUL_COOLER_GPU_RESOLUTION="${COOLER_GPU_RESOLUTION:-1920x1080}"
+  export GHUL_GPU_MSAA="${GPU_MSAA:-0}"
   
   # Run Hellfire tests in sequence (automatically confirm with YES)
   # Track if any test failed - if so, skip all subsequent tests
