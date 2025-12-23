@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.4.5"
+GHUL_VERSION="0.4.6"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -644,36 +644,64 @@ if have nvidia-smi; then
 fi
 
 # Method 2: Fallback to lspci if nvidia-smi didn't work or for non-NVIDIA GPUs
+# IMPORTANT: Prefer dedicated GPUs (NVIDIA/AMD) over integrated GPUs (Intel) when multiple GPUs are present
 if [[ "$gpu_model" == "unknown" || -z "$gpu_model" ]]; then
   if have lspci; then
-    # First VGA/3D card
-    l="$(LC_ALL=C lspci -nn | grep -Ei 'VGA compatible controller|3D controller' | head -n1 || true)"
-    if [[ -n "$l" ]]; then
-      # Hersteller
-      if echo "$l" | grep -qi 'NVIDIA'; then
-        gpu_man="NVIDIA"
-        gpu_vendor="nvidia"
-      elif echo "$l" | grep -qi 'AMD\|ATI'; then
-        gpu_man="AMD"
-        gpu_vendor="amd"
-      elif echo "$l" | grep -qi 'Intel'; then
-        gpu_man="Intel"
-        gpu_vendor="intel"
+    # Get all VGA/3D controllers
+    local all_gpus
+    all_gpus="$(LC_ALL=C lspci -nn | grep -Ei 'VGA compatible controller|3D controller' || true)"
+    
+    if [[ -n "$all_gpus" ]]; then
+      local selected_gpu=""
+      
+      # Priority 1: Prefer NVIDIA (dedicated GPU with own RAM)
+      selected_gpu="$(echo "$all_gpus" | grep -i 'NVIDIA' | head -n1 || true)"
+      
+      # Priority 2: If no NVIDIA, prefer AMD (dedicated GPU with own RAM)
+      if [[ -z "$selected_gpu" ]]; then
+        selected_gpu="$(echo "$all_gpus" | grep -iE '\bAMD\b|\bATI\b|\bRadeon\b' | head -n1 || true)"
       fi
-
-      # try to fetch model in square brackets (Radeon ...)
-      gpu_model="$(echo "$l" | sed -n 's/.*\[\(Radeon[^]]*\)\].*/\1/p')"
-
-      # Fallback: text after "controller:" without brackets
-      if [[ -z "$gpu_model" ]]; then
-        gpu_model="$(echo "$l" \
-          | sed -n 's/.*controller:[[:space:]]*\(.*\)/\1/p' \
-          | sed 's/\[[^]]*\]//g' \
-          | sed 's/(.*)//' \
-          | xargs)"
+      
+      # Priority 3: Fallback to Intel (integrated GPU, shared RAM) only if no dedicated GPU found
+      if [[ -z "$selected_gpu" ]]; then
+        selected_gpu="$(echo "$all_gpus" | grep -i 'Intel' | head -n1 || true)"
       fi
+      
+      # Priority 4: If still nothing, take first GPU (unknown vendor)
+      if [[ -z "$selected_gpu" ]]; then
+        selected_gpu="$(echo "$all_gpus" | head -n1 || true)"
+      fi
+      
+      # Use selected GPU for detection
+      if [[ -n "$selected_gpu" ]]; then
+        l="$selected_gpu"
+        
+        # Hersteller
+        if echo "$l" | grep -qi 'NVIDIA'; then
+          gpu_man="NVIDIA"
+          gpu_vendor="nvidia"
+        elif echo "$l" | grep -qiE '\bAMD\b|\bATI\b|\bRadeon\b'; then
+          gpu_man="AMD"
+          gpu_vendor="amd"
+        elif echo "$l" | grep -qi 'Intel'; then
+          gpu_man="Intel"
+          gpu_vendor="intel"
+        fi
 
-      [[ -z "$gpu_model" ]] && gpu_model="unknown"
+        # try to fetch model in square brackets (Radeon ...)
+        gpu_model="$(echo "$l" | sed -n 's/.*\[\(Radeon[^]]*\)\].*/\1/p')"
+
+        # Fallback: text after "controller:" without brackets
+        if [[ -z "$gpu_model" ]]; then
+          gpu_model="$(echo "$l" \
+            | sed -n 's/.*controller:[[:space:]]*\(.*\)/\1/p' \
+            | sed 's/\[[^]]*\]//g' \
+            | sed 's/(.*)//' \
+            | xargs)"
+        fi
+
+        [[ -z "$gpu_model" ]] && gpu_model="unknown"
+      fi
     fi
   fi
 fi
@@ -1327,23 +1355,33 @@ echo "-- GPU tests..."
 echo "   glmark2"
 GPU_JSON='{}'
 
-# Helper function: get GPU launcher command (prime-run for NVIDIA, DRI_PRIME=1 for AMD hybrid graphics)
+# Helper function: get GPU launcher command (prime-run for NVIDIA hybrid, DRI_PRIME=1 for AMD hybrid graphics)
+# Only use launcher for hybrid systems (dedicated + integrated GPU), not for pure dedicated GPU systems
 get_gpu_launcher() {
   if [[ "$gpu_vendor" == "nvidia" ]] && command -v prime-run >/dev/null 2>&1; then
-    echo "prime-run "
-  elif [[ "$gpu_vendor" == "amd" ]]; then
-    # Check if AMD hybrid graphics (AMD dedicated + Intel integrated)
-    # This is detected by checking if we have both AMD and Intel GPUs
+    # Check if NVIDIA hybrid graphics (NVIDIA dedicated + Intel integrated)
+    # Only use prime-run if both NVIDIA and Intel GPUs are present
     if command -v lspci >/dev/null 2>&1; then
       local gpu_list
       gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
-      if echo "$gpu_list" | grep -qi 'AMD\|ATI' && echo "$gpu_list" | grep -qi 'Intel'; then
-        # AMD hybrid detected - use DRI_PRIME=1
+      if echo "$gpu_list" | grep -qi 'NVIDIA' && echo "$gpu_list" | grep -qi 'Intel'; then
+        # NVIDIA hybrid detected - use prime-run to force dedicated GPU
+        echo "prime-run "
+      fi
+    fi
+  elif [[ "$gpu_vendor" == "amd" ]]; then
+    # Check if AMD hybrid graphics (AMD dedicated + Intel integrated)
+    # Only use DRI_PRIME=1 if both AMD and Intel GPUs are present
+    if command -v lspci >/dev/null 2>&1; then
+      local gpu_list
+      gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
+      if echo "$gpu_list" | grep -qiE '\bAMD\b|\bATI\b|\bRadeon\b' && echo "$gpu_list" | grep -qi 'Intel'; then
+        # AMD hybrid detected - use DRI_PRIME=1 to force dedicated GPU
         echo "DRI_PRIME=1 "
       fi
     fi
   fi
-  # Return empty string if no launcher needed
+  # Return empty string if no launcher needed (pure dedicated GPU system or pure iGPU system)
   echo ""
 }
 
@@ -1374,7 +1412,7 @@ else
   GPU_JSON="$(printf '%s' "$GPU_JSON" | jq '. + {glmark2_score:"missing"}')"
 fi
 
-# --- vkmark: single run via gamescope, XCB winsys ---
+# --- vkmark: single run in windowed mode, XCB winsys ---
 mark_event "gpu_vkmark_start"
 echo "   vkmark"
 
@@ -1405,22 +1443,15 @@ if have vkmark; then
   set +o notify
   trap "" SIGABRT
 
-  if command -v gamescope >/dev/null 2>&1; then
-    {
-      setsid bash -c "
-        env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 \
-          ${GPU_LAUNCHER}gamescope -f -w 1920 -h 1080 -- \
-          vkmark --winsys=xcb > \"$tmp_log\" 2>&1
-      "
-    } >/dev/null 2>&1 || true
-  else
-    {
-      setsid bash -c "
-        env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 \
-          ${GPU_LAUNCHER}vkmark --winsys=xcb > \"$tmp_log\" 2>&1
-      "
-    } >/dev/null 2>&1 || true
-  fi
+  # Run vkmark in windowed mode at 1920x1080 (Full HD) for consistent, comparable results
+  # Use --present-mode fifo (VSync) instead of default "mailbox" for better compatibility
+  # Direct execution works better than gamescope fullscreen for vkmark
+  {
+    setsid bash -c "
+      env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 \
+        ${GPU_LAUNCHER}vkmark --winsys=xcb --present-mode fifo --size 1920x1080 > \"$tmp_log\" 2>&1
+    "
+  } >/dev/null 2>&1 || true
 
   # Restore trap
   trap - SIGABRT
@@ -1447,18 +1478,48 @@ if have vkmark; then
 
   cat "$tmp_log" >"$vk_log"
   
-  # v0.2: Handle NVIDIA vkmark limitation (proprietary driver)
-  # Only set to null if the run actually failed (score = 0 AND no scenes found)
-  # With newer kernels (6.17+) and Mesa, vkmark can work on NVIDIA
+  # Improved vkmark evaluation: try → evaluate → handle gracefully
+  # vkmark is always attempted (even on NVIDIA), using prime-run for hybrid systems
+  # Only set to null if the run actually failed (no valid score AND no scenes found)
   scenes_count="$(printf '%s' "$SCENES_JSON" | jq 'length' 2>/dev/null || echo 0)"
   
-  if [[ "$gpu_vendor" == "nvidia" && "$score" == "0" && "$scenes_count" == "0" ]]; then
-    # Run failed: no score and no scenes = driver limitation or error
-    GPU_JSON="$(printf '%s' "$GPU_JSON" | jq '. + {vkmark_score: null, vkmark_note: "Skipped on NVIDIA (proprietary driver limitation)", vkmark_scenes: {}}')"
-  else
-    # Run succeeded (or score > 0): use the actual score
+  # Check if we got a valid score (non-zero) or found any scenes
+  if [[ "$score" != "0" && -n "$score" ]] || [[ "$scenes_count" -gt 0 ]]; then
+    # Run succeeded: use the actual score (even if 0, but scenes were found)
     GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --arg s "${score}" '. + {vkmark_score: ($s|tonumber? // 0)}')"
     GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --argjson obj "$SCENES_JSON" '. + {vkmark_scenes: $obj}')"
+  else
+    # Run failed: no score and no scenes = driver limitation, missing Vulkan support, or error
+    # Determine more specific reason for failure based on GPU vendor and configuration
+    failure_reason="vkmark run failed or returned no score"
+    
+    if [[ "$gpu_vendor" == "nvidia" ]]; then
+      # Check if prime-run was used (hybrid system)
+      if [[ "$GPU_LAUNCHER" == "prime-run " ]]; then
+        failure_reason="vkmark run failed (NVIDIA GPU with prime-run, may require Vulkan support or driver update)"
+      else
+        # Dedicated NVIDIA GPU without prime-run, or prime-run not available
+        failure_reason="vkmark run failed (NVIDIA GPU, prime-run not available or Vulkan support missing)"
+      fi
+    elif [[ "$gpu_vendor" == "amd" ]]; then
+      # Check if DRI_PRIME was used (hybrid system)
+      if [[ "$GPU_LAUNCHER" == "DRI_PRIME=1 " ]]; then
+        failure_reason="vkmark run failed (AMD dedicated GPU with DRI_PRIME=1, Vulkan support may be missing or incomplete)"
+      else
+        # Dedicated AMD GPU or integrated AMD GPU
+        failure_reason="vkmark run failed (AMD GPU, Vulkan support may be missing or incomplete)"
+      fi
+    elif [[ "$gpu_vendor" == "intel" ]]; then
+      # Intel iGPU (integrated graphics) - may not support Vulkan on older generations
+      # Intel HD Graphics (Haswell and older) have limited/no Vulkan support
+      # Intel HD Graphics 4600 (i7-6700) may have limited Vulkan support depending on driver
+      failure_reason="vkmark run failed (Intel iGPU, Vulkan support may be missing or limited on this generation)"
+    else
+      # Unknown GPU vendor
+      failure_reason="vkmark run failed (unknown GPU vendor, Vulkan support may be missing)"
+    fi
+    
+    GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --arg reason "$failure_reason" '. + {vkmark_score: null, vkmark_note: $reason, vkmark_scenes: {}}')"
   fi
 else
   GPU_JSON="$(printf '%s' "$GPU_JSON" | jq '. + {vkmark_score:"missing", vkmark_scenes:{}}')"

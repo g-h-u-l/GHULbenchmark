@@ -970,6 +970,50 @@ check_disk_group() {
   fi
 }
 
+# ---------- check essential AUR packages (root mode) ------------------------
+
+check_essential_aur_packages() {
+  local missing_essential=()
+  
+  # Check if essential AUR packages are installed
+  for i in "${!AUR_CMDS[@]}"; do
+    local cmd="${AUR_CMDS[$i]}"
+    local pkg="${AUR_PKGS[$i]}"
+    
+    if ! have "$cmd"; then
+      missing_essential+=("$pkg")
+    fi
+  done
+  
+  # Show warning if any essential AUR packages are missing
+  if (( ${#missing_essential[@]} > 0 )); then
+    echo
+    yellow "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    yellow "[!] WICHTIG: Essentielle AUR-Pakete fehlen!"
+    yellow "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+    echo "    Die folgenden Pakete sind ESSENTIELL für GHULbenchmark und müssen"
+    echo "    manuell installiert werden (AUR-Pakete können nicht automatisch installiert werden):"
+    echo
+    for pkg in "${missing_essential[@]}"; do
+      echo "      - ${pkg}"
+    done
+    echo
+    echo "    Installationsbefehl:"
+    if has_aur_helper; then
+      echo "      yay -S ${missing_essential[*]}"
+    else
+      echo "      # Zuerst AUR-Helper installieren:"
+      echo "      pacman -S yay"
+      echo "      # Dann AUR-Pakete installieren:"
+      echo "      yay -S ${missing_essential[*]}"
+    fi
+    echo
+    yellow "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+  fi
+}
+
 # ---------- main --------------------------------------------------------------
 
 print_header
@@ -979,6 +1023,7 @@ if [[ $EUID -eq 0 ]]; then
   echo
   ensure_host_id_root_mode
   install_deps_root_mode
+  check_essential_aur_packages
   generate_all_logs_root_mode
   setup_storage_temp_access
   green "== All done! You can now run ./ghul-benchmark.sh =="
