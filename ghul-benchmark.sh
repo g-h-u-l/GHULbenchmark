@@ -635,7 +635,7 @@ gpu_vendor="unknown"  # v0.2: lowercase vendor for sensor detection (amd/nvidia/
 
 # Method 1: Try nvidia-smi first (most reliable for NVIDIA GPUs)
 if have nvidia-smi; then
-  gpu_model="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 | xargs || echo "")"
+  gpu_model="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
   if [[ -n "$gpu_model" && "$gpu_model" != "" ]]; then
     gpu_man="NVIDIA"
     gpu_vendor="nvidia"
@@ -648,11 +648,10 @@ fi
 if [[ "$gpu_model" == "unknown" || -z "$gpu_model" ]]; then
   if have lspci; then
     # Get all VGA/3D controllers
-    local all_gpus
     all_gpus="$(LC_ALL=C lspci -nn | grep -Ei 'VGA compatible controller|3D controller' || true)"
     
     if [[ -n "$all_gpus" ]]; then
-      local selected_gpu=""
+      selected_gpu=""
       
       # Priority 1: Prefer NVIDIA (dedicated GPU with own RAM)
       selected_gpu="$(echo "$all_gpus" | grep -i 'NVIDIA' | head -n1 || true)"
@@ -697,7 +696,7 @@ if [[ "$gpu_model" == "unknown" || -z "$gpu_model" ]]; then
             | sed -n 's/.*controller:[[:space:]]*\(.*\)/\1/p' \
             | sed 's/\[[^]]*\]//g' \
             | sed 's/(.*)//' \
-            | xargs)"
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
         fi
 
         [[ -z "$gpu_model" ]] && gpu_model="unknown"
@@ -755,8 +754,8 @@ fi
 if [[ "$mb_prod" == "unknown" ]] && have lshw; then
   tmp="$(lshw -quiet -C bus 2>/dev/null || true)"
   if [[ -n "$tmp" ]]; then
-    mb_man2="$(echo "$tmp" | awk -F: '/vendor:/ {print $2}' | xargs || true)"
-    mb_prod2="$(echo "$tmp" | awk -F: '/product:/ {print $2}' | xargs || true)"
+    mb_man2="$(echo "$tmp" | awk -F: '/vendor:/ {print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
+    mb_prod2="$(echo "$tmp" | awk -F: '/product:/ {print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
     [[ -n "$mb_man2"  ]] && mb_man="$mb_man2"
     [[ -n "$mb_prod2" ]] && mb_prod="$mb_prod2"
   fi
@@ -1400,8 +1399,13 @@ if have glmark2; then
 
   # Run glmark2 in fullscreen at 1920x1080, neutral locale for parsing
   # Use prime-run if NVIDIA GPU detected and prime-run is available
-  env LANG=C LC_ALL=C \
-    ${GPU_LAUNCHER}glmark2 --fullscreen --size 1920x1080 >"$gl_log" 2>&1
+  if [[ -n "$GPU_LAUNCHER" ]]; then
+    env LANG=C LC_ALL=C \
+      $GPU_LAUNCHER glmark2 --fullscreen --size 1920x1080 >"$gl_log" 2>&1 || true
+  else
+    env LANG=C LC_ALL=C \
+      glmark2 --fullscreen --size 1920x1080 >"$gl_log" 2>&1 || true
+  fi
 
   # Parse the final glmark2 Score line
   score="$(awk -F: '/glmark2 Score/ { gsub(/[[:space:]]+/,"",$2); print $2 }' "$gl_log" | tail -1)"
@@ -1447,10 +1451,17 @@ if have vkmark; then
   # Use --present-mode fifo (VSync) instead of default "mailbox" for better compatibility
   # Direct execution works better than gamescope fullscreen for vkmark
   {
-    setsid bash -c "
-      env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 \
-        ${GPU_LAUNCHER}vkmark --winsys=xcb --present-mode fifo --size 1920x1080 > \"$tmp_log\" 2>&1
-    "
+    if [[ -n "$GPU_LAUNCHER" ]]; then
+      setsid bash -c "
+        env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 \
+          $GPU_LAUNCHER vkmark --winsys=xcb --present-mode fifo --size 1920x1080 > \"$tmp_log\" 2>&1
+      "
+    else
+      setsid bash -c "
+        env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 \
+          vkmark --winsys=xcb --present-mode fifo --size 1920x1080 > \"$tmp_log\" 2>&1
+      "
+    fi
   } >/dev/null 2>&1 || true
 
   # Restore trap
@@ -1541,8 +1552,13 @@ if have gputest; then
   # /print_score ensures a machine-readable summary
   # Use prime-run if NVIDIA GPU detected and prime-run is available
   set +e
-  ${GPU_LAUNCHER}gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /benchmark /print_score \
+  if [[ -n "$GPU_LAUNCHER" ]]; then
+    $GPU_LAUNCHER gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /benchmark /print_score \
       >"$gputest_log" 2>&1
+  else
+    gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /benchmark /print_score \
+      >"$gputest_log" 2>&1
+  fi
   exitcode=$?
   set -e
 

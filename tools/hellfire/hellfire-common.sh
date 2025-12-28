@@ -452,14 +452,14 @@ read_nvidia_gpu_sensors() {
   local power="null"
   
   if [[ -n "$nvidia_output" ]]; then
-    edge="$(echo "$nvidia_output" | cut -d',' -f1 | xargs || echo "")"
-    vram="$(echo "$nvidia_output" | cut -d',' -f2 | xargs || echo "")"
-    fan="$(echo "$nvidia_output" | cut -d',' -f3 | xargs || echo "")"
-    power="$(echo "$nvidia_output" | cut -d',' -f4 | xargs || echo "")"
+    edge="$(echo "$nvidia_output" | cut -d',' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
+    vram="$(echo "$nvidia_output" | cut -d',' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
+    fan="$(echo "$nvidia_output" | cut -d',' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
+    power="$(echo "$nvidia_output" | cut -d',' -f4 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
     
     # Remove % from fan speed
     if [[ -n "$fan" && "$fan" != "null" ]]; then
-      fan="$(echo "$fan" | sed 's/%//' | xargs || echo "")"
+      fan="$(echo "$fan" | sed 's/%//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
     fi
     
     # Handle "N/A" for memory temperature (older GPUs don't have VRAM sensors)
@@ -484,9 +484,9 @@ get_gpu_power_limit() {
   
   if [[ "$gpu_vendor" == "nvidia" ]]; then
     if have nvidia-smi; then
-      power_limit="$(nvidia-smi --query-gpu=power.limit --format=csv,noheader,nounits 2>/dev/null | head -n1 | xargs || echo "")"
+      power_limit="$(nvidia-smi --query-gpu=power.limit --format=csv,noheader,nounits 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
       # Remove "W" suffix if present
-      power_limit="$(echo "$power_limit" | sed 's/W//' | xargs || echo "")"
+      power_limit="$(echo "$power_limit" | sed 's/W//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
     fi
   elif [[ "$gpu_vendor" == "amd" ]]; then
     # Try to read from sensors -j (PPT)

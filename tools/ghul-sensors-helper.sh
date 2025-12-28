@@ -376,14 +376,14 @@ read_amd_gpu_sensors() {
     local sclk_line
     sclk_line="$(grep '\*' "${amd_card_path}/pp_dpm_sclk" 2>/dev/null | head -n1 || echo "")"
     if [[ -n "$sclk_line" ]]; then
-      clock_core="$(echo "$sclk_line" | awk '{print $2}' | sed 's/MHz//' | xargs || echo "")"
+      clock_core="$(echo "$sclk_line" | awk '{print $2}' | sed 's/MHz//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
     fi
     
     # Read current GPU memory clock (marked with *)
     local mclk_line
     mclk_line="$(grep '\*' "${amd_card_path}/pp_dpm_mclk" 2>/dev/null | head -n1 || echo "")"
     if [[ -n "$mclk_line" ]]; then
-      clock_mem="$(echo "$mclk_line" | awk '{print $2}' | sed 's/MHz//' | xargs || echo "")"
+      clock_mem="$(echo "$mclk_line" | awk '{print $2}' | sed 's/MHz//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
     fi
   fi
   
@@ -415,16 +415,16 @@ read_nvidia_gpu_sensors() {
   
   if [[ -n "$nvidia_output" ]]; then
     # Parse CSV output: temperature,fan_speed,power_draw,clock_core,clock_mem
-    # Note: nvidia-smi may include spaces, so we use xargs to trim
-    temp="$(echo "$nvidia_output" | cut -d',' -f1 | xargs || echo "")"
-    fan="$(echo "$nvidia_output" | cut -d',' -f2 | xargs || echo "")"
-    power="$(echo "$nvidia_output" | cut -d',' -f3 | xargs || echo "")"
-    clock_core="$(echo "$nvidia_output" | cut -d',' -f4 | xargs || echo "")"
-    clock_mem="$(echo "$nvidia_output" | cut -d',' -f5 | xargs || echo "")"
+    # Note: nvidia-smi may include spaces, so we use sed to trim
+    temp="$(echo "$nvidia_output" | cut -d',' -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
+    fan="$(echo "$nvidia_output" | cut -d',' -f2 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
+    power="$(echo "$nvidia_output" | cut -d',' -f3 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
+    clock_core="$(echo "$nvidia_output" | cut -d',' -f4 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
+    clock_mem="$(echo "$nvidia_output" | cut -d',' -f5 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
     
     # Sanitize: remove % from fan speed, ensure values are valid
     if [[ -n "$fan" && "$fan" != "null" ]]; then
-      fan="$(echo "$fan" | sed 's/%//' | xargs || echo "")"
+      fan="$(echo "$fan" | sed 's/%//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
     fi
     
     # Convert [N/A] and empty strings to null

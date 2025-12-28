@@ -179,15 +179,23 @@ check_hybrid_graphics() {
   echo
   
   # Check for NVIDIA Optimus (prime-run)
-  if [[ $has_nvidia -eq 1 ]]; then
+  # Only check if we actually have both NVIDIA and Intel GPUs (true hybrid system)
+  if [[ $has_nvidia -eq 1 && $has_intel -eq 1 ]]; then
     if command -v prime-run >/dev/null 2>&1; then
       green "    ✓ prime-run available (NVIDIA Optimus support)"
       echo "      GPU benchmarks will automatically use the NVIDIA GPU"
     else
-      yellow "    ⚠ prime-run not found (NVIDIA Optimus)"
+      yellow "    ⚠ prime-run not found (NVIDIA Optimus hybrid detected)"
       echo "      Install: pacman -S nvidia-prime"
       echo "      Without prime-run, GPU tests may run on the integrated GPU"
+      # Set flag for later installation (if in root mode)
+      NEEDS_PRIME_RUN=1
     fi
+    echo
+  elif [[ $has_nvidia -eq 1 ]]; then
+    # NVIDIA only (no Intel), prime-run not needed
+    green "    ✓ NVIDIA GPU detected (no hybrid graphics)"
+    echo "      prime-run not needed (dedicated GPU only)"
     echo
   fi
   
@@ -232,6 +240,43 @@ check_hybrid_graphics() {
     echo "    Multiple GPUs detected but no dedicated GPU found"
     echo "    (likely multiple integrated GPUs or unknown configuration)"
     echo
+  fi
+  
+  # Export flags for later use
+  export NEEDS_PRIME_RUN="${NEEDS_PRIME_RUN:-0}"
+  export HAS_NVIDIA_HYBRID=0
+  if [[ $has_nvidia -eq 1 && $has_intel -eq 1 ]]; then
+    export HAS_NVIDIA_HYBRID=1
+  fi
+}
+
+# ----- Install prime-run if needed (NVIDIA hybrid graphics) -------------------
+
+install_prime_run_if_needed() {
+  # Only install if we detected NVIDIA+Intel hybrid and prime-run is missing
+  if [[ "${HAS_NVIDIA_HYBRID:-0}" -eq 1 && "${NEEDS_PRIME_RUN:-0}" -eq 1 ]]; then
+    if ! command -v prime-run >/dev/null 2>&1; then
+      echo "[*] Installing nvidia-prime for NVIDIA Optimus support..."
+      echo
+      
+      if pacman -S --noconfirm --needed nvidia-prime 2>&1; then
+        if command -v prime-run >/dev/null 2>&1; then
+          green "    → nvidia-prime installed successfully"
+          echo "      GPU benchmarks will now use the NVIDIA GPU automatically"
+        else
+          yellow "    → Warning: nvidia-prime installed but prime-run command not found"
+          echo "      You may need to log out and back in, or reboot"
+        fi
+      else
+        yellow "    → Warning: Could not install nvidia-prime"
+        echo "      You may need to install it manually:"
+        echo "      pacman -S nvidia-prime"
+      fi
+      echo
+    else
+      green "    → prime-run already available"
+      echo
+    fi
   fi
 }
 
@@ -1023,6 +1068,7 @@ if [[ $EUID -eq 0 ]]; then
   echo
   ensure_host_id_root_mode
   install_deps_root_mode
+  install_prime_run_if_needed
   check_essential_aur_packages
   generate_all_logs_root_mode
   setup_storage_temp_access
@@ -1044,6 +1090,20 @@ else
   check_deps_user_mode
   check_logs_presence
   check_disk_group
+  
+  # Show prime-run installation hint if needed
+  if [[ "${HAS_NVIDIA_HYBRID:-0}" -eq 1 && "${NEEDS_PRIME_RUN:-0}" -eq 1 ]]; then
+    echo
+    yellow "[!] NVIDIA Optimus hybrid graphics detected, but prime-run is missing."
+    echo "    For proper GPU benchmark results, install nvidia-prime:"
+    echo
+    echo "      sudo pacman -S nvidia-prime"
+    echo
+    echo "    Or run firstrun.sh as root to install automatically:"
+    echo "      sudo ./firstrun.sh"
+    echo
+  fi
+  
   green "You can already run ./ghul-benchmark.sh,"
   echo "but for full hardware details in JSON and storage temperature access,"
   echo "consider running: sudo ./firstrun.sh"
