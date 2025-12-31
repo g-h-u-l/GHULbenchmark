@@ -748,16 +748,17 @@ install_deps_root_mode() {
     echo -n "    Install AUR packages? [y/N]: "
     read -r answer
     if [[ "${answer,,}" =~ ^y(es)?$ ]]; then
+      # Step 1: Ensure yay is installed (as root, via pacman)
       # Check if AUR helper is already available
       if has_aur_helper; then
-        green "    → AUR helper (yay) found"
+        green "    → AUR helper (yay) already installed"
       else
-        # No AUR helper found - install yay (available via pacman)
-        yellow "    → No AUR helper found. Installing yay..."
+        # No AUR helper found - install yay (available via pacman, as root)
+        yellow "    → Installing yay via pacman (as root)..."
         echo "    → This will allow installation of AUR packages."
         echo
         if pacman -S --noconfirm --needed yay 2>&1 && command -v yay >/dev/null 2>&1; then
-          green "    → yay installed successfully."
+          green "    → yay installed successfully (as root)."
         else
           yellow "    → Warning: Could not install yay (may not be available on this distro)."
           echo "    → You may need to install yay manually:"
@@ -768,11 +769,50 @@ install_deps_root_mode() {
         fi
       fi
       
+      # Step 2: Install AUR packages as normal user (drop root privileges at the end)
       echo
-      yellow "    Installing AUR packages via yay..."
-      yay -S --noconfirm "${missing_aur[@]}" 2>&1 || {
+      yellow "    Installing AUR packages via yay (as normal user)..."
+      echo "    → Dropping root privileges for AUR installation..."
+      echo "    → (makepkg cannot run as root for security reasons)"
+      echo
+      
+      # Determine target user (should be SUDO_USER when running with sudo)
+      local target_user="${SUDO_USER:-}"
+      if [[ -z "$target_user" ]]; then
+        yellow "    → Warning: SUDO_USER not set. Cannot drop privileges."
+        echo "    → Please install AUR packages manually as your user:"
+        echo "      yay -S ${missing_aur[*]}"
+        echo
+        return 0
+      fi
+      
+      # Verify yay is available for the target user (should be, since it's in /usr/bin)
+      # Use full path to be sure, or check if it's in a standard location
+      local yay_path
+      yay_path="$(sudo -u "$target_user" command -v yay 2>/dev/null || echo "")"
+      if [[ -z "$yay_path" ]]; then
+        # Try to find yay in standard locations
+        if [[ -x /usr/bin/yay ]]; then
+          yay_path="/usr/bin/yay"
+          green "    → Found yay at /usr/bin/yay"
+        else
+          yellow "    → Warning: yay not found in PATH for user '$target_user'."
+          echo "    → This is unusual - yay should be available after installation."
+          echo "    → You may need to install AUR packages manually as your user:"
+          echo "      yay -S ${missing_aur[*]}"
+          echo
+          return 0
+        fi
+      fi
+      
+      # Install AUR packages as normal user (drop root privileges)
+      if sudo -u "$target_user" "$yay_path" -S --noconfirm "${missing_aur[@]}" 2>&1; then
+        green "    → AUR packages installed successfully."
+      else
         yellow "    → Warning: AUR installation may have failed or requires manual intervention."
-      }
+        echo "    → You may need to install them manually as your user:"
+        echo "      yay -S ${missing_aur[*]}"
+      fi
       echo
       green "[✓] AUR dependency installation attempted."
     else

@@ -205,11 +205,70 @@ main() {
       fi
       
       green "  Starting GPU stress (moderate, ${cooler_gpu_width}x${cooler_gpu_height}, MSAA=0)..."
-      # Use prime-run for NVIDIA hybrid graphics or DRI_PRIME=1 for AMD hybrid graphics
+      # Use prime-run for NVIDIA hybrid graphics or DRI_PRIME=1 for AMD/Nouveau hybrid graphics
       local gpu_launcher=""
       local gpu_env=""
-      if [[ "$gpu_vendor" == "nvidia" ]] && command -v prime-run >/dev/null 2>&1; then
-        gpu_launcher="prime-run "
+      if [[ "$gpu_vendor" == "nvidia" ]]; then
+        # Check if NVIDIA hybrid graphics (NVIDIA dedicated + Intel integrated)
+        if command -v lspci >/dev/null 2>&1; then
+          local gpu_list
+          gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
+          if echo "$gpu_list" | grep -qi 'NVIDIA' && echo "$gpu_list" | grep -qi 'Intel'; then
+            # NVIDIA hybrid detected
+            if command -v prime-run >/dev/null 2>&1; then
+              # Check if prime-run actually works (nvidia-smi must work)
+              if nvidia-smi >/dev/null 2>&1; then
+                # prime-run works - use it
+                gpu_launcher="prime-run "
+              else
+                # prime-run exists but doesn't work (GPU deactivated or Nouveau in use)
+                # Try to activate GPU and use Nouveau
+                local nvidia_pci
+                nvidia_pci="$(lspci -nn | grep -iE '3D controller.*nvidia' | head -n1 | awk '{print $1}')"
+                if [[ -n "$nvidia_pci" ]] && [[ -f "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" ]]; then
+                  local enable_state
+                  enable_state="$(cat "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" 2>/dev/null || echo "0")"
+                  if [[ "$enable_state" == "0" ]]; then
+                    # GPU is deactivated - try to activate it using helper script
+                    local helper_script="${SCRIPT_DIR}/../ghul-enable-nvidia-gpu.sh"
+                    if [[ -f "$helper_script" ]] && sudo -n "$helper_script" >/dev/null 2>&1; then
+                      # Helper script exists and can run without password
+                      sudo "$helper_script" >/dev/null 2>&1 || true
+                    else
+                      # Fallback: try direct activation (requires root, will fail without sudo)
+                      echo "1" | sudo tee "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" >/dev/null 2>&1 || true
+                      sudo modprobe nouveau 2>/dev/null || true
+                    fi
+                  fi
+                fi
+                # For Nouveau, we can't use prime-run, but we can try DRI_PRIME=1
+                gpu_env="DRI_PRIME=1"
+              fi
+            else
+              # prime-run not available - try to activate GPU and use Nouveau
+              local nvidia_pci
+              nvidia_pci="$(lspci -nn | grep -iE '3D controller.*nvidia' | head -n1 | awk '{print $1}')"
+              if [[ -n "$nvidia_pci" ]] && [[ -f "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" ]]; then
+                local enable_state
+                enable_state="$(cat "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" 2>/dev/null || echo "0")"
+                if [[ "$enable_state" == "0" ]]; then
+                  # GPU is deactivated - try to activate it using helper script
+                  local helper_script="${SCRIPT_DIR}/../ghul-enable-nvidia-gpu.sh"
+                  if [[ -f "$helper_script" ]] && sudo -n "$helper_script" >/dev/null 2>&1; then
+                    # Helper script exists and can run without password
+                    sudo "$helper_script" >/dev/null 2>&1 || true
+                  else
+                    # Fallback: try direct activation (requires root, will fail without sudo)
+                    echo "1" | sudo tee "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" >/dev/null 2>&1 || true
+                    sudo modprobe nouveau 2>/dev/null || true
+                  fi
+                fi
+              fi
+              # Try DRI_PRIME=1 for Nouveau
+              gpu_env="DRI_PRIME=1"
+            fi
+          fi
+        fi
       elif [[ "$gpu_vendor" == "amd" ]]; then
         # Check if AMD hybrid graphics (AMD dedicated + Intel integrated)
         if command -v lspci >/dev/null 2>&1; then

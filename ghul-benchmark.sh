@@ -18,7 +18,7 @@
 set -euo pipefail
 
 # GHUL version
-GHUL_VERSION="0.4.7"
+GHUL_VERSION="0.4.6"
 GHUL_REPO="g-h-u-l/GHULbenchmark"
 GHUL_REPO_URL="https://github.com/${GHUL_REPO}"
 
@@ -633,13 +633,20 @@ gpu_man="unknown"
 gpu_model="unknown"
 gpu_vendor="unknown"  # v0.2: lowercase vendor for sensor detection (amd/nvidia/intel/unknown)
 
-# Method 1: Try nvidia-smi first (most reliable for NVIDIA GPUs)
+# Method 1: Try nvidia-smi first (most reliable for NVIDIA GPUs with proprietary driver)
 if have nvidia-smi; then
   gpu_model="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")"
+  # Check if nvidia-smi returned a valid GPU name (not an error message)
   if [[ -n "$gpu_model" && "$gpu_model" != "" ]]; then
-    gpu_man="NVIDIA"
-    gpu_vendor="nvidia"
-    # gpu_model is already set from nvidia-smi
+    # Reject common error messages that nvidia-smi might return
+    if ! echo "$gpu_model" | grep -qiE "failed|error|couldn't|not found|NVIDIA-SMI"; then
+      gpu_man="NVIDIA"
+      gpu_vendor="nvidia"
+      # gpu_model is already set from nvidia-smi
+    else
+      # nvidia-smi returned an error message, treat as if it didn't work
+      gpu_model=""
+    fi
   fi
 fi
 
@@ -687,19 +694,32 @@ if [[ "$gpu_model" == "unknown" || -z "$gpu_model" ]]; then
           gpu_vendor="intel"
         fi
 
-        # try to fetch model in square brackets (Radeon ...)
-        gpu_model="$(echo "$l" | sed -n 's/.*\[\(Radeon[^]]*\)\].*/\1/p')"
-
-        # Fallback: text after "controller:" without brackets
+        # Try to fetch model in square brackets (GeForce, Radeon, etc.)
+        # First try: Look for GeForce/Radeon/etc. in brackets
+        gpu_model="$(echo "$l" | sed -n 's/.*\[\(GeForce[^]]*\)\].*/\1/p')"
         if [[ -z "$gpu_model" ]]; then
-          gpu_model="$(echo "$l" \
-            | sed -n 's/.*controller:[[:space:]]*\(.*\)/\1/p' \
+          gpu_model="$(echo "$l" | sed -n 's/.*\[\(Radeon[^]]*\)\].*/\1/p')"
+        fi
+        # Also try other common model names in brackets (not PCI IDs)
+        if [[ -z "$gpu_model" ]]; then
+          # Extract all bracketed content and find the one that's not a PCI ID (xxxx:xxxx format)
+          gpu_model="$(echo "$l" | grep -oE '\[[^]]+\]' | sed 's/\[//;s/\]//' | grep -vE '^[0-9a-f]{4}:[0-9a-f]{4}$' | grep -vE '^[0-9]{4}$' | head -1 || true)"
+        fi
+
+        # Fallback: text after "controller:" or "3D controller:" without brackets
+        if [[ -z "$gpu_model" || "$gpu_model" == "" ]]; then
+          # Handle both "VGA compatible controller:" and "3D controller:" formats
+          gpu_model="$(echo "$l" | sed -n 's/.*\(VGA compatible\|3D\) controller[[:space:]]*\[[^]]*\]:[[:space:]]*\(.*\)/\2/p' \
             | sed 's/\[[^]]*\]//g' \
             | sed 's/(.*)//' \
             | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          # If we got something like "NVIDIA Corporation GM107M", try to extract just the model part
+          if echo "$gpu_model" | grep -qi "Corporation"; then
+            gpu_model="$(echo "$gpu_model" | sed 's/.*Corporation[[:space:]]*//' | sed 's/[[:space:]]*\[.*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          fi
         fi
 
-        [[ -z "$gpu_model" ]] && gpu_model="unknown"
+        [[ -z "$gpu_model" || "$gpu_model" == "" ]] && gpu_model="unknown"
       fi
     fi
   fi
@@ -713,22 +733,97 @@ fi
 gpu_renderer="$gpu_model"
 opengl_version="missing"
 if have glxinfo; then
-  # If gpu_model is still unknown, try to extract from OpenGL renderer string
-  if [[ "$gpu_renderer" == "unknown" || -z "$gpu_renderer" ]]; then
-    # Extract GPU renderer name (remove /PCIe/SSE2 etc. suffixes)
-    gpu_renderer="$(cap glxinfo | awk -F: '
+  # For NVIDIA hybrid systems, always try DRI_PRIME=1 to get the dedicated GPU renderer
+  if [[ "$gpu_vendor" == "nvidia" ]]; then
+    # First get default renderer (usually Intel integrated)
+    default_renderer="$(cap glxinfo 2>/dev/null | awk -F: '
       /OpenGL renderer/ {
         sub(/^ /,"",$2);
-        # Remove everything after first "/" (e.g. "/PCIe/SSE2")
         gsub(/\/.*$/,"",$2);
         print $2;
         exit
-      }')"
-    [[ -z "$gpu_renderer" ]] && gpu_renderer="unknown"
+      }' || echo "")"
+    # Also try glxinfo -B format (more reliable)
+    if [[ -z "$default_renderer" || "$default_renderer" == "" ]]; then
+      default_renderer="$(cap glxinfo -B 2>/dev/null | awk -F: '
+        /OpenGL renderer string/ {
+          sub(/^ /,"",$2);
+          gsub(/\/.*$/,"",$2);
+          print $2;
+          exit
+        }' || echo "")"
+    fi
+    
+    # Try DRI_PRIME=1 to get the NVIDIA GPU (Nouveau or proprietary)
+    nvidia_renderer="$(DRI_PRIME=1 cap glxinfo 2>/dev/null | awk -F: '
+      /OpenGL renderer/ {
+        sub(/^ /,"",$2);
+        gsub(/\/.*$/,"",$2);
+        print $2;
+        exit
+      }' || echo "")"
+    # Also try glxinfo -B format (more reliable)
+    if [[ -z "$nvidia_renderer" || "$nvidia_renderer" == "" ]]; then
+      nvidia_renderer="$(DRI_PRIME=1 cap glxinfo -B 2>/dev/null | awk -F: '
+        /OpenGL renderer string/ {
+          sub(/^ /,"",$2);
+          gsub(/\/.*$/,"",$2);
+          print $2;
+          exit
+        }' || echo "")"
+    fi
+    
+    # Prefer the NVIDIA renderer if we got one (even if different from default)
+    if [[ -n "$nvidia_renderer" ]]; then
+      gpu_renderer="$nvidia_renderer"
+      # If gpu_model is still unknown, try to improve it from renderer or lspci
+      if [[ "$gpu_model" == "unknown" || -z "$gpu_model" ]]; then
+        # If renderer is a Nouveau code (NV117, etc.), try to get model from lspci
+        if echo "$gpu_renderer" | grep -qiE "^NV[0-9]"; then
+          if have lspci; then
+            nvidia_line="$(lspci -nn | grep -iE '3D controller.*nvidia' | head -n1 || true)"
+            if [[ -n "$nvidia_line" ]]; then
+              # Try to extract GeForce model from brackets
+              gpu_model="$(echo "$nvidia_line" | sed -n 's/.*\[\(GeForce[^]]*\)\].*/\1/p')"
+              [[ -z "$gpu_model" ]] && gpu_model="$gpu_renderer"
+            else
+              gpu_model="$gpu_renderer"
+            fi
+          else
+            gpu_model="$gpu_renderer"
+          fi
+        else
+          # Renderer might be the actual model name
+          gpu_model="$gpu_renderer"
+        fi
+      fi
+    elif [[ -n "$default_renderer" ]]; then
+      # Fallback to default renderer if DRI_PRIME=1 didn't work
+      gpu_renderer="$default_renderer"
+    fi
+  else
+    # For non-NVIDIA GPUs, just use default glxinfo
+    if [[ "$gpu_renderer" == "unknown" || -z "$gpu_renderer" ]]; then
+      gpu_renderer="$(cap glxinfo 2>/dev/null | awk -F: '
+        /OpenGL renderer/ {
+          sub(/^ /,"",$2);
+          gsub(/\/.*$/,"",$2);
+          print $2;
+          exit
+        }' || echo "")"
+    fi
   fi
   
-  opengl_version="$(cap glxinfo | awk -F: '
-    /OpenGL version/  {sub(/^ /,"",$2); print $2; exit}')"
+  [[ -z "$gpu_renderer" || "$gpu_renderer" == "" ]] && gpu_renderer="unknown"
+  
+  # Get OpenGL version (try DRI_PRIME=1 if we're using Nouveau)
+  if [[ "$gpu_vendor" == "nvidia" ]] && echo "$gpu_renderer" | grep -qiE "^NV[0-9]"; then
+    opengl_version="$(DRI_PRIME=1 cap glxinfo 2>/dev/null | awk -F: '
+      /OpenGL version/  {sub(/^ /,"",$2); print $2; exit}' || echo "missing")"
+  else
+    opengl_version="$(cap glxinfo 2>/dev/null | awk -F: '
+      /OpenGL version/  {sub(/^ /,"",$2); print $2; exit}' || echo "missing")"
+  fi
 fi
 
 
@@ -1357,15 +1452,73 @@ GPU_JSON='{}'
 # Helper function: get GPU launcher command (prime-run for NVIDIA hybrid, DRI_PRIME=1 for AMD hybrid graphics)
 # Only use launcher for hybrid systems (dedicated + integrated GPU), not for pure dedicated GPU systems
 get_gpu_launcher() {
-  if [[ "$gpu_vendor" == "nvidia" ]] && command -v prime-run >/dev/null 2>&1; then
+  if [[ "$gpu_vendor" == "nvidia" ]]; then
     # Check if NVIDIA hybrid graphics (NVIDIA dedicated + Intel integrated)
-    # Only use prime-run if both NVIDIA and Intel GPUs are present
     if command -v lspci >/dev/null 2>&1; then
       local gpu_list
       gpu_list="$(lspci -nn 2>/dev/null | grep -iE 'VGA compatible controller|3D controller' || true)"
       if echo "$gpu_list" | grep -qi 'NVIDIA' && echo "$gpu_list" | grep -qi 'Intel'; then
-        # NVIDIA hybrid detected - use prime-run to force dedicated GPU
-        echo "prime-run "
+        # NVIDIA hybrid detected
+        if command -v prime-run >/dev/null 2>&1; then
+          # Check if prime-run actually works (nvidia-smi must work)
+          if nvidia-smi >/dev/null 2>&1; then
+            # prime-run works - use it
+            echo "prime-run "
+          else
+            # prime-run exists but doesn't work (GPU deactivated or Nouveau in use)
+            # Try to activate GPU and use Nouveau
+            local nvidia_pci
+            nvidia_pci="$(lspci -nn | grep -iE '3D controller.*nvidia' | head -n1 | awk '{print $1}')"
+            if [[ -n "$nvidia_pci" ]] && [[ -f "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" ]]; then
+              local enable_state
+              enable_state="$(cat "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" 2>/dev/null || echo "0")"
+            if [[ "$enable_state" == "0" ]]; then
+              # GPU is deactivated - try to activate it using helper script
+              local helper_script="${BASE}/tools/ghul-enable-nvidia-gpu.sh"
+              if [[ -f "$helper_script" ]] && sudo -n "$helper_script" >/dev/null 2>&1; then
+                # Helper script exists and can run without password
+                sudo "$helper_script" >/dev/null 2>&1 || true
+              else
+                # Fallback: try direct activation (requires root, will fail without sudo)
+                echo "1" > "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" 2>/dev/null || true
+                modprobe nouveau 2>/dev/null || true
+              fi
+              # For Nouveau, we can't use prime-run, but we can try DRI_PRIME=1
+              # (Nouveau might work with DRI_PRIME if the GPU is activated)
+              echo "DRI_PRIME=1 "
+              else
+                # GPU is activated but prime-run doesn't work - probably Nouveau
+                # Try DRI_PRIME=1 for Nouveau
+                echo "DRI_PRIME=1 "
+              fi
+            else
+              # Can't determine PCI address or enable file - try DRI_PRIME=1 anyway
+              echo "DRI_PRIME=1 "
+            fi
+          fi
+        else
+          # prime-run not available - try to activate GPU and use Nouveau
+          local nvidia_pci
+          nvidia_pci="$(lspci -nn | grep -iE '3D controller.*nvidia' | head -n1 | awk '{print $1}')"
+          if [[ -n "$nvidia_pci" ]] && [[ -f "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" ]]; then
+            local enable_state
+            enable_state="$(cat "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" 2>/dev/null || echo "0")"
+            if [[ "$enable_state" == "0" ]]; then
+              # GPU is deactivated - try to activate it using helper script
+              local helper_script="${BASE}/tools/ghul-enable-nvidia-gpu.sh"
+              if [[ -f "$helper_script" ]] && sudo -n "$helper_script" >/dev/null 2>&1; then
+                # Helper script exists and can run without password
+                sudo "$helper_script" >/dev/null 2>&1 || true
+              else
+                # Fallback: try direct activation (requires root, will fail without sudo)
+                echo "1" > "/sys/bus/pci/devices/0000:${nvidia_pci}/enable" 2>/dev/null || true
+                modprobe nouveau 2>/dev/null || true
+              fi
+            fi
+            # Try DRI_PRIME=1 for Nouveau
+            echo "DRI_PRIME=1 "
+          fi
+        fi
       fi
     fi
   elif [[ "$gpu_vendor" == "amd" ]]; then
@@ -1384,12 +1537,47 @@ get_gpu_launcher() {
   echo ""
 }
 
+# Color helper functions (if not already defined)
+if ! declare -f yellow >/dev/null 2>&1; then
+  yellow() { printf '\e[33m%s\e[0m\n' "$*"; }
+fi
+
+# Helper function to run GPU commands with proper launcher
+run_with_gpu_launcher() {
+  local cmd="$1"
+  shift
+  local args=("$@")
+  
+  if [[ -z "$GPU_LAUNCHER" ]]; then
+    # No launcher - run directly
+    "$cmd" "${args[@]}"
+  elif [[ "$GPU_LAUNCHER" == "prime-run " ]]; then
+    # Use prime-run as command prefix
+    prime-run "$cmd" "${args[@]}"
+  elif [[ "$GPU_LAUNCHER" == "DRI_PRIME=1 " ]]; then
+    # Use DRI_PRIME=1 as environment variable
+    env DRI_PRIME=1 "$cmd" "${args[@]}"
+  else
+    # Fallback: try to use as-is (might be a command)
+    $GPU_LAUNCHER "$cmd" "${args[@]}"
+  fi
+}
+
 GPU_LAUNCHER="$(get_gpu_launcher)"
+gpu_launcher_type="none"
 if [[ -n "$GPU_LAUNCHER" ]]; then
   if [[ "$GPU_LAUNCHER" == "prime-run " ]]; then
     echo "   [Using prime-run for NVIDIA GPU]"
+    gpu_launcher_type="prime-run"
   elif [[ "$GPU_LAUNCHER" == "DRI_PRIME=1 " ]]; then
-    echo "   [Using DRI_PRIME=1 for AMD GPU]"
+    if [[ "$gpu_vendor" == "nvidia" ]]; then
+      echo "   [Using DRI_PRIME=1 for NVIDIA GPU (Nouveau driver)]"
+      yellow "   [Note: prime-run not available/working, using Nouveau with DRI_PRIME=1]"
+      gpu_launcher_type="DRI_PRIME=1 (Nouveau)"
+    else
+      echo "   [Using DRI_PRIME=1 for AMD GPU]"
+      gpu_launcher_type="DRI_PRIME=1 (AMD)"
+    fi
   fi
 fi
 
@@ -1399,13 +1587,7 @@ if have glmark2; then
 
   # Run glmark2 in fullscreen at 1920x1080, neutral locale for parsing
   # Use prime-run if NVIDIA GPU detected and prime-run is available
-  if [[ -n "$GPU_LAUNCHER" ]]; then
-    env LANG=C LC_ALL=C \
-      $GPU_LAUNCHER glmark2 --fullscreen --size 1920x1080 >"$gl_log" 2>&1 || true
-  else
-    env LANG=C LC_ALL=C \
-      glmark2 --fullscreen --size 1920x1080 >"$gl_log" 2>&1 || true
-  fi
+  (export LANG=C LC_ALL=C; run_with_gpu_launcher glmark2 --fullscreen --size 1920x1080) >"$gl_log" 2>&1 || true
 
   # Parse the final glmark2 Score line
   score="$(awk -F: '/glmark2 Score/ { gsub(/[[:space:]]+/,"",$2); print $2 }' "$gl_log" | tail -1)"
@@ -1451,10 +1633,15 @@ if have vkmark; then
   # Use --present-mode fifo (VSync) instead of default "mailbox" for better compatibility
   # Direct execution works better than gamescope fullscreen for vkmark
   {
-    if [[ -n "$GPU_LAUNCHER" ]]; then
+    if [[ "$GPU_LAUNCHER" == "DRI_PRIME=1 " ]]; then
+      setsid bash -c "
+        env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 DRI_PRIME=1 \
+          vkmark --winsys=xcb --present-mode fifo --size 1920x1080 > \"$tmp_log\" 2>&1
+      "
+    elif [[ "$GPU_LAUNCHER" == "prime-run " ]]; then
       setsid bash -c "
         env LANG=C LC_ALL=C XDG_SESSION_TYPE=x11 \
-          $GPU_LAUNCHER vkmark --winsys=xcb --present-mode fifo --size 1920x1080 > \"$tmp_log\" 2>&1
+          prime-run vkmark --winsys=xcb --present-mode fifo --size 1920x1080 > \"$tmp_log\" 2>&1
       "
     else
       setsid bash -c "
@@ -1552,13 +1739,8 @@ if have gputest; then
   # /print_score ensures a machine-readable summary
   # Use prime-run if NVIDIA GPU detected and prime-run is available
   set +e
-  if [[ -n "$GPU_LAUNCHER" ]]; then
-    $GPU_LAUNCHER gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /benchmark /print_score \
-      >"$gputest_log" 2>&1
-  else
-    gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /benchmark /print_score \
-      >"$gputest_log" 2>&1
-  fi
+  run_with_gpu_launcher gputest /test=fur /width=1920 /height=1080 /gpumon_terminal /benchmark /print_score \
+    >"$gputest_log" 2>&1
   exitcode=$?
   set -e
 
@@ -1609,6 +1791,9 @@ else
 fi
 
 # --- add all gpu Benchmarks to JSON result -------------------------------------
+
+# Add GPU launcher information to GPU_JSON
+GPU_JSON="$(printf '%s' "$GPU_JSON" | jq --arg launcher "$gpu_launcher_type" '. + {gpu_launcher: $launcher}')"
 
 add_obj "gpu" "$GPU_JSON"
 

@@ -184,6 +184,7 @@ vkmark="$(jq -r '.gpu.vkmark_score // empty' "$RESULT_FILE")"
 vkmark_note="$(jq -r '.gpu.vkmark_note // empty' "$RESULT_FILE")"
 gputest_score="$(jqr '.gpu.gputest_fur.score // 0' "$RESULT_FILE")"
 gputest_fps="$(jqr '.gpu.gputest_fur.fps // 0' "$RESULT_FILE")"
+gpu_renderer="$(jqr '.environment.gpu_renderer // "unknown"' "$RESULT_FILE")"
 
 # CPU assesment
 p7_mips="$(jqr '.cpu.p7zip_tot_mips // 0' "$RESULT_FILE")"
@@ -487,6 +488,17 @@ echo "GpuTest FurMark:     score=$gputest_score, FPS=$gputest_fps"
 echo
 echo "GPU rating:          $rate_gpu"
 
+# Check if Nouveau driver is being used (Nouveau renderer codes start with "NV" followed by numbers)
+if [[ "$gpu_man" == "NVIDIA" ]] && echo "$gpu_renderer" | grep -qiE '^NV[0-9]'; then
+  echo
+  yellow "⚠ NVIDIA Nouveau Driver Detected"
+  yellow "   Nouveau is not a suitable driver for gaming."
+  yellow "   The graphics card is too old for modern proprietary NVIDIA drivers."
+  yellow "   This is not a Linux problem, but a manufacturer problem with"
+  yellow "   proprietary driver philosophy. NVIDIA causes headaches."
+  echo
+fi
+
 # GPU temperature warnings
 if [[ -n "$SENS_FILE" && -f "$SENS_FILE" ]]; then
   RUN_START_EPOCH="$(jq -r '.timeline[]? | select(.name=="run_start") | .epoch' "$RESULT_FILE" | head -n1 || jq -r '.timeline[0].epoch // empty' "$RESULT_FILE" || echo "")"
@@ -761,6 +773,14 @@ if [[ "$FAN_STATUS" == "unattainable" ]]; then
   echo
 fi
 
-green "GHUL verdict: This machine is ready for Linux gaming – see details above for tuning ideas."
+# Check if Nouveau driver is being used and adjust verdict accordingly
+if [[ "$gpu_man" == "NVIDIA" ]] && echo "$gpu_renderer" | grep -qiE '^NV[0-9]'; then
+  yellow "GHUL verdict: This machine is NOT suitable for gaming due to Nouveau driver limitations."
+  yellow "  The system is still usable for office work, web browsing, and CPU-based video editing,"
+  yellow "  but gaming performance is severely limited. This is not a Linux problem, but a"
+  yellow "  manufacturer issue: NVIDIA no longer provides driver support for this graphics card."
+else
+  green "GHUL verdict: This machine is ready for Linux gaming – see details above for tuning ideas."
+fi
 echo "You can compare multiple JSON files over time to see the impact of upgrades and tweaks."
 echo
